@@ -1,0 +1,32 @@
+[package]
+name = "oxideav-farbfeld"
+version = "0.0.1"
+edition = "2021"
+rust-version = "1.80"
+license = "MIT"
+repository = "https://github.com/OxideAV/oxideav-farbfeld"
+homepage = "https://github.com/OxideAV/oxideav-farbfeld"
+authors = ["Mark Karpeles"]
+description = "Pure-Rust farbfeld reader/writer — minimalist lossless 16-bit RGBA image format from suckless"
+readme = "README.md"
+keywords = ["multimedia", "image", "farbfeld", "codec", "pure-rust"]
+categories = ["multimedia::encoding", "multimedia::images"]
+
+[dependencies]
+# `oxideav-core` is gated behind the default-on `registry` feature so
+# image-library consumers can depend on `oxideav-farbfeld` with
+# `default-features = false` and avoid the framework dependency tree
+# entirely. Without `registry` the crate exposes the standalone
+# `parse_farbfeld` / `encode_farbfeld` / `encode_farbfeld_from_rgba16`
+# API plus crate-local `FarbfeldImage` / `FarbfeldError` types and never
+# references `oxideav-core`.
+oxideav-core = { version = "0.1", optional = true }
+
+[features]
+default = ["registry"]
+
+# Wires up the codec / encoder / decoder / container demuxer + muxer
+# trait implementations against `oxideav-core` so the crate can plug
+# into the `oxideav` framework registry. Default-on; turn off for
+# image-library use-cases that just want the standalone parser/encoder.
+registry = ["dep:oxideav-core"]
