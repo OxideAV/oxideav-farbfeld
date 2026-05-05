@@ -10,8 +10,8 @@
 use std::io::Cursor;
 
 use oxideav_core::{
-    CodecId, CodecParameters, ContainerRegistry, Decoder, Demuxer, Encoder, Frame, MediaType,
-    Muxer, NullCodecResolver, PixelFormat, StreamInfo, TimeBase, VideoFrame, VideoPlane,
+    CodecId, CodecParameters, ContainerRegistry, Frame, MediaType, NullCodecResolver, PixelFormat,
+    StreamInfo, TimeBase, VideoFrame, VideoPlane,
 };
 
 use oxideav_farbfeld::{
@@ -128,9 +128,11 @@ fn encoder_handles_padded_stride() {
     data[2..4].copy_from_slice(&0u16.to_le_bytes());
     data[4..6].copy_from_slice(&0u16.to_le_bytes());
     data[6..8].copy_from_slice(&0xFFFFu16.to_le_bytes());
-    // Garbage in pad
-    for i in row_bytes..stride {
-        data[i] = 0xAB;
+    // Garbage in every row's trailing pad — bytes [row_bytes..stride) of each row.
+    for row in data.chunks_exact_mut(stride) {
+        for byte in &mut row[row_bytes..] {
+            *byte = 0xAB;
+        }
     }
 
     let frame = Frame::Video(VideoFrame {
