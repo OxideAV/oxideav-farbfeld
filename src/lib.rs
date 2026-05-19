@@ -52,6 +52,7 @@ pub mod image;
 pub mod parser;
 #[cfg(feature = "registry")]
 pub mod registry;
+pub mod stream;
 
 /// Codec id for farbfeld image frames.
 pub const CODEC_ID_STR: &str = "farbfeld";
@@ -59,7 +60,10 @@ pub const CODEC_ID_STR: &str = "farbfeld";
 pub use encoder::{encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image};
 pub use error::{FarbfeldError, Result};
 pub use image::FarbfeldImage;
-pub use parser::{parse_farbfeld, BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
+pub use parser::{
+    parse_farbfeld, parse_farbfeld_header, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+};
+pub use stream::{FarbfeldStreamReader, FarbfeldStreamWriter};
 
 #[cfg(feature = "registry")]
 pub use registry::{register, register_codecs, register_containers};

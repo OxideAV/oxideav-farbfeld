@@ -15,17 +15,29 @@ crate's farbfeld submodule were consulted.
 
 ## Status
 
-Round 1 covers the entire spec — parser, encoder, and registry-side
+Round 1 covered the entire spec — parser, encoder, and registry-side
 trait integration. Self-roundtrip and bit-exact byte compares against
 hand-built reference files are hard-asserted in `tests/`.
 
-| Capability        | Status |
-|-------------------|--------|
-| Parse             | full   |
-| Encode            | full   |
-| Round-trip        | exact  |
-| Container demux   | full   |
-| Container mux     | full   |
+Round 2 hardened the parser against a malicious 16-byte header
+announcing a multi-gigabyte body (the body length is now cross-checked
+*before* the pixel buffer allocation), added a row-at-a-time
+[`FarbfeldStreamReader`] / [`FarbfeldStreamWriter`] API that decodes /
+encodes without holding the whole image in memory, and added a
+`magick`-cross-validator integration test that round-trips through
+ImageMagick's farbfeld coder.
+
+| Capability                      | Status                            |
+|---------------------------------|-----------------------------------|
+| Parse (whole-file)              | full                              |
+| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader`     |
+| Encode (whole-file)             | full                              |
+| Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter`    |
+| Round-trip (self)               | exact                             |
+| Round-trip (vs `magick`)        | exact (bit-identical, when present)|
+| Container demux                 | full                              |
+| Container mux                   | full                              |
+| DoS hardening (crafted header)  | refuses without allocating body   |
 
 ## API
 
@@ -52,6 +64,26 @@ assert_eq!(img.width, 1);
 assert_eq!(img.height, 1);
 assert_eq!(img.pixels, [0xFFFF, 0x0000, 0x0000, 0xFFFF]);
 # Ok::<(), FarbfeldError>(())
+```
+
+Streaming (row-at-a-time, no whole-image buffer needed):
+
+```rust
+use std::io::Cursor;
+use oxideav_farbfeld::{FarbfeldStreamReader, FarbfeldStreamWriter};
+
+// Encode a 2-row image one row at a time.
+let mut writer = FarbfeldStreamWriter::new(Vec::new(), 1, 2).unwrap();
+writer.write_row(&[0xFFFF, 0, 0, 0xFFFF]).unwrap();
+writer.write_row(&[0, 0xFFFF, 0, 0xFFFF]).unwrap();
+let bytes = writer.finish().unwrap();
+
+// Decode it back, one row at a time.
+let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+let mut row = [0u16; 4];
+while reader.read_row(&mut row).unwrap() {
+    // do something with this row...
+}
 ```
 
 Registry-integrated (default; pulls in `oxideav-core`):

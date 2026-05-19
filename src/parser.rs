@@ -16,6 +16,17 @@
 //! row-major scan order. Total file size is `16 + 8 * width * height`
 //! bytes; anything shorter is truncated, anything longer carries
 //! trailing garbage which this parser rejects.
+//!
+//! ## DoS hardening
+//!
+//! The header carries two `u32` dimensions. A maliciously-crafted file
+//! can declare `width = height = u32::MAX / 2` while shipping only the
+//! 16-byte header. To prevent that turning into a multi-gigabyte
+//! [`Vec`] allocation, [`parse_farbfeld`] cross-checks the announced
+//! `width * height * 8` body length against the **actual** number of
+//! body bytes available **before** allocating the decoded pixel buffer.
+//! Any mismatch is reported as [`FarbfeldError::InvalidData`] without
+//! attempting to allocate the announced-but-absent body capacity.
 
 use crate::error::{FarbfeldError, Result};
 use crate::image::FarbfeldImage;
@@ -29,32 +40,45 @@ pub const HEADER_LEN: usize = 16;
 /// Bytes per pixel on disk: 4 channels × 2 bytes per channel.
 pub const BYTES_PER_PIXEL: usize = 8;
 
-/// Parse a complete farbfeld byte stream into a [`FarbfeldImage`].
+/// Decoded farbfeld header: dimensions plus the computed body length.
 ///
-/// Returns [`FarbfeldError::InvalidData`] for any of:
-/// * fewer than 16 header bytes;
-/// * the magic prefix is not literal ASCII `"farbfeld"`;
-/// * `width * height * 8` overflows `usize` (only on 32-bit hosts with
-///   pathological dimensions);
-/// * the body length doesn't exactly equal `width * height * 8`.
-pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
-    if bytes.len() < HEADER_LEN {
+/// Returned by [`parse_farbfeld_header`] for callers that want to
+/// inspect the dimensions before committing to a full in-memory parse
+/// (e.g. to refuse images larger than a per-application sandbox cap, or
+/// to choose between [`parse_farbfeld`] and the streaming reader).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FarbfeldHeader {
+    /// Picture width in pixels, exactly as carried on disk.
+    pub width: u32,
+    /// Picture height in pixels, exactly as carried on disk.
+    pub height: u32,
+    /// `width * height * 8` — the number of body bytes that **must**
+    /// follow the 16-byte header for the file to be well-formed.
+    pub body_len: usize,
+}
+
+/// Parse the 16-byte farbfeld header.
+///
+/// Validates the magic prefix and that `width * height * 8` does not
+/// overflow `usize`. Does **not** look at the body — callers can use
+/// [`FarbfeldHeader::body_len`] to size the body read or to reject an
+/// over-large image before committing to a buffer allocation.
+pub fn parse_farbfeld_header(header: &[u8]) -> Result<FarbfeldHeader> {
+    if header.len() < HEADER_LEN {
         return Err(FarbfeldError::invalid(format!(
             "farbfeld: header truncated — got {} bytes, need at least {HEADER_LEN}",
-            bytes.len()
+            header.len()
         )));
     }
-    if &bytes[..8] != MAGIC {
+    if &header[..8] != MAGIC {
         return Err(FarbfeldError::invalid(format!(
             "farbfeld: bad magic {:?}, expected {:?}",
-            &bytes[..8],
+            &header[..8],
             MAGIC
         )));
     }
-    // SAFETY of indexing: we just checked `bytes.len() >= 16`.
-    let width = u32::from_be_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
-    let height = u32::from_be_bytes([bytes[12], bytes[13], bytes[14], bytes[15]]);
-
+    let width = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
+    let height = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
     let pixel_count = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| {
@@ -67,22 +91,45 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
             "farbfeld: pixel byte count ({pixel_count} * {BYTES_PER_PIXEL}) overflows usize"
         ))
     })?;
-    let expected_total = HEADER_LEN.checked_add(body_len).ok_or_else(|| {
+    Ok(FarbfeldHeader {
+        width,
+        height,
+        body_len,
+    })
+}
+
+/// Parse a complete farbfeld byte stream into a [`FarbfeldImage`].
+///
+/// Returns [`FarbfeldError::InvalidData`] for any of:
+/// * fewer than 16 header bytes;
+/// * the magic prefix is not literal ASCII `"farbfeld"`;
+/// * `width * height * 8` overflows `usize` (only on 32-bit hosts with
+///   pathological dimensions);
+/// * the body length doesn't exactly equal `width * height * 8`.
+///
+/// The body length cross-check happens **before** the pixel buffer is
+/// allocated, so a crafted header announcing a multi-gigabyte body on
+/// a 17-byte file is rejected without first allocating gigabytes of
+/// pixel-buffer capacity. See the module-level "DoS hardening" note.
+pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
+    let header = parse_farbfeld_header(bytes)?;
+    let expected_total = HEADER_LEN.checked_add(header.body_len).ok_or_else(|| {
         FarbfeldError::invalid("farbfeld: total file size overflows usize".to_string())
     })?;
-
     if bytes.len() != expected_total {
         return Err(FarbfeldError::invalid(format!(
-            "farbfeld: body size mismatch — file has {} bytes, header announces {} ({width}×{height} pixels × {BYTES_PER_PIXEL} bytes + {HEADER_LEN} header)",
+            "farbfeld: body size mismatch — file has {} bytes, header announces {} ({}×{} pixels × {BYTES_PER_PIXEL} bytes + {HEADER_LEN} header)",
             bytes.len(),
-            expected_total
+            expected_total,
+            header.width,
+            header.height,
         )));
     }
 
-    // Decode big-endian 16-bit samples into native-endian u16. Each
-    // pixel takes 8 bytes / 4 samples; the loop is the entire body.
+    // Body length matches the header; safe to allocate the pixel buffer
+    // at full capacity. Each pixel is 4 u16 samples, 8 bytes on disk.
     let body = &bytes[HEADER_LEN..];
-    let sample_count = pixel_count * 4;
+    let sample_count = header.body_len / 2;
     let mut pixels = Vec::with_capacity(sample_count);
     for i in 0..sample_count {
         let off = i * 2;
@@ -90,8 +137,8 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
     }
 
     Ok(FarbfeldImage {
-        width,
-        height,
+        width: header.width,
+        height: header.height,
         pixels,
     })
 }
