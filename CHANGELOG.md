@@ -18,6 +18,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   header without reading the body. Lets callers inspect the
   dimensions and reject over-large images before committing to a
   pixel-buffer allocation.
+- `cargo-fuzz` decode target (`fuzz/fuzz_targets/decode.rs`): drives
+  `parse_farbfeld`, `parse_farbfeld_header`, and `FarbfeldStreamReader`
+  against arbitrary attacker bytes (must never panic), cross-checks the
+  whole-file vs streaming verdict, and asserts the decode → encode
+  roundtrip is byte-identical on inputs that parse. 37M executions /
+  120 s clean.
 
 ### Changed
 
@@ -27,6 +33,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   announcing huge dimensions is now refused in microseconds instead
   of triggering a multi-gigabyte allocation.
 
+### Fixed
+
+- DoS hardening of `FarbfeldStreamReader` (found by the new fuzz
+  target). Three allocation/CPU amplifications where a tiny crafted
+  header forced an outsized response, all now bounded by the body bytes
+  actually delivered:
+  - `read_all_rows` pre-allocated the *announced* `width·height·4`
+    samples (a 16-byte file announcing 65 536×65 536 ⇒ ~34 GB) before
+    reading any body — now grown one row at a time.
+  - `FarbfeldStreamReader::new` pre-allocated the *announced* `width·8`
+    row buffer (a 21-byte file announcing `width = 0x29000000` ⇒
+    ~5.9 GB/row) — the per-row read is now length-bounded via
+    `Read::take`, so the buffer grows only to the bytes delivered.
+  - `read_all_rows` looped `height` (up to 2³²) empty iterations on a
+    zero-width image — now short-circuits since a zero-width body is
+    empty whatever the height.
+
 ### Tested
 
 - New `tests/streaming.rs`: row-major streaming reader and writer
@@ -34,7 +57,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   byte-for-byte across 1×1..128×64 image sizes.
 - New `tests/dos_hardening.rs`: regression for the body-length
   cross-check; 65 535×65 535 crafted header is refused inside 500 ms
-  without allocating the announced 32 GB.
+  without allocating the announced 32 GB. Extended with three streaming
+  regressions covering the `read_all_rows` / constructor allocation
+  bounds and the zero-width short-circuit.
 - New `tests/magick_xv.rs`: opaque-process cross-validator that
   round-trips our encoder output through ImageMagick's farbfeld
   coder and re-parses it with us, and decodes magick-produced

@@ -1,0 +1,44 @@
+[package]
+name = "oxideav-farbfeld-fuzz"
+version = "0.0.0"
+publish = false
+edition = "2021"
+
+[package.metadata]
+cargo-fuzz = true
+
+# farbfeld is a fixed-layout container (8-byte magic + two BE u32
+# dimensions + width*height*4 BE u16 samples). The decode surface is
+# `parse_farbfeld` / `parse_farbfeld_header` / the streaming reader —
+# all pure byte-slice / io::Read parsers with no external dependency to
+# cross-decode against. This fuzz crate exercises the decoder against
+# arbitrary attacker bytes (it must never panic) and, on the inputs that
+# parse, checks the lossless re-encode roundtrip.
+#
+# The harness builds against the standalone (no `oxideav-core`) API:
+# `default-features = false` drops the framework dependency so the fuzz
+# target compiles and links the parser/encoder directly.
+
+[dependencies]
+libfuzzer-sys = "0.4"
+
+[dependencies.oxideav-farbfeld]
+path = ".."
+default-features = false
+
+[lib]
+name = "oxideav_farbfeld_fuzz"
+path = "src/lib.rs"
+
+# Prevent this from interfering with the umbrella workspace.
+[workspace]
+members = ["."]
+
+[profile.release]
+debug = 1
+
+[[bin]]
+name = "decode"
+path = "fuzz_targets/decode.rs"
+test = false
+doc = false

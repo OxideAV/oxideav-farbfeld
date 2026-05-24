@@ -27,6 +27,17 @@ encodes without holding the whole image in memory, and added a
 `magick`-cross-validator integration test that round-trips through
 ImageMagick's farbfeld coder.
 
+Round 3 added a `cargo-fuzz` decode target (`fuzz/fuzz_targets/decode.rs`)
+that drives `parse_farbfeld`, `parse_farbfeld_header`, and the streaming
+reader against arbitrary bytes and cross-checks the decode → encode
+roundtrip. It surfaced three allocation/CPU DoS amplifications in
+`FarbfeldStreamReader`, all now fixed: the convenience `read_all_rows`
+drain pre-allocated the *announced* `width·height·4` samples, the
+constructor pre-allocated the *announced* `width·8` row buffer, and the
+zero-width case looped `height` (up to 2³²) empty iterations. Each is now
+bounded by the bytes actually delivered; regression tests live in
+`tests/dos_hardening.rs`.
+
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
 | Parse (whole-file)              | full                              |
@@ -37,7 +48,8 @@ ImageMagick's farbfeld coder.
 | Round-trip (vs `magick`)        | exact (bit-identical, when present)|
 | Container demux                 | full                              |
 | Container mux                   | full                              |
-| DoS hardening (crafted header)  | refuses without allocating body   |
+| DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes |
+| Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
 
 ## API
 

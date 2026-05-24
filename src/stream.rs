@@ -33,8 +33,15 @@ pub struct FarbfeldStreamReader<R: Read> {
     inner: R,
     header: FarbfeldHeader,
     rows_read: u32,
-    /// Reusable per-row scratch buffer (`width * 8` bytes of on-disk
-    /// big-endian samples).
+    /// On-disk bytes per row (`width * 8`), validated at construction to
+    /// fit in `usize`. The scratch buffer that holds one row is grown
+    /// lazily inside [`read_row`](Self::read_row) so a header that
+    /// announces a multi-gigabyte row width can't force the allocation
+    /// before any body bytes are present (see the DoS-hardening note on
+    /// [`read_row`](Self::read_row)).
+    row_bytes: usize,
+    /// Reusable per-row scratch buffer, grown only as far as the bytes
+    /// the reader actually delivers.
     row_buf: Vec<u8>,
 }
 
@@ -48,6 +55,9 @@ impl<R: Read> FarbfeldStreamReader<R> {
         let mut header_buf = [0u8; HEADER_LEN];
         read_exact_to_invalid(&mut inner, &mut header_buf, "farbfeld: header")?;
         let header = parse_farbfeld_header(&header_buf)?;
+        // Validate `width * 8` fits in `usize` but do NOT allocate it yet:
+        // the per-row scratch buffer is grown lazily on the first
+        // `read_row`, capped by the bytes the reader actually supplies.
         let row_bytes = (header.width as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .ok_or_else(|| FarbfeldError::invalid("farbfeld: row size overflows usize"))?;
@@ -55,7 +65,8 @@ impl<R: Read> FarbfeldStreamReader<R> {
             inner,
             header,
             rows_read: 0,
-            row_buf: vec![0u8; row_bytes],
+            row_bytes,
+            row_buf: Vec::new(),
         })
     }
 
@@ -99,6 +110,16 @@ impl<R: Read> FarbfeldStreamReader<R> {
     /// * [`FarbfeldError::InvalidData`] if `out` is the wrong length,
     ///   or if the underlying reader yields fewer than `width * 8`
     ///   bytes (truncated file).
+    ///
+    /// # DoS hardening
+    ///
+    /// The row body is read with a length-bounded [`Read::take`] into a
+    /// buffer grown only as far as the bytes the reader actually
+    /// delivers. A header announcing a multi-gigabyte row width
+    /// (`width = 0x2c000000`, ~5.9 GB per row) but shipping no body must
+    /// not be able to force the announced-width allocation: the bounded
+    /// read tops out at the bytes present, and a short read surfaces as a
+    /// truncation error having allocated only what arrived.
     pub fn read_row(&mut self, out: &mut [u16]) -> Result<bool> {
         if self.rows_read >= self.header.height {
             return Ok(false);
@@ -112,12 +133,7 @@ impl<R: Read> FarbfeldStreamReader<R> {
             )));
         }
         // Zero-width images carry no body — still count the row.
-        if !self.row_buf.is_empty() {
-            read_exact_to_invalid(
-                &mut self.inner,
-                &mut self.row_buf,
-                "farbfeld stream: row body",
-            )?;
+        if self.read_row_bytes()? {
             for (i, slot) in out.iter_mut().enumerate() {
                 let off = i * 2;
                 *slot = u16::from_be_bytes([self.row_buf[off], self.row_buf[off + 1]]);
@@ -127,31 +143,90 @@ impl<R: Read> FarbfeldStreamReader<R> {
         Ok(true)
     }
 
+    /// Read the next row's `width * 8` on-disk bytes into `self.row_buf`
+    /// with a length-bounded read, advancing `rows_read` accounting in
+    /// the caller. Returns `Ok(true)` when body bytes were read (i.e.
+    /// `width > 0`), `Ok(false)` for the zero-width no-body case.
+    ///
+    /// The read uses [`Read::take`] capped at `row_bytes` and
+    /// `read_to_end`, so `self.row_buf` only grows as far as the bytes
+    /// the reader actually delivers — a header announcing a multi-
+    /// gigabyte row width but shipping no body fails as a truncation
+    /// error having allocated only what arrived, never the full
+    /// announced `width * 8`.
+    fn read_row_bytes(&mut self) -> Result<bool> {
+        if self.row_bytes == 0 {
+            return Ok(false);
+        }
+        self.row_buf.clear();
+        let read = (&mut self.inner)
+            .take(self.row_bytes as u64)
+            .read_to_end(&mut self.row_buf)
+            .map_err(|e| {
+                FarbfeldError::invalid(format!("farbfeld stream: row body: io error: {e}"))
+            })?;
+        if read != self.row_bytes {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: row body: truncated input ({} bytes wanted, {read} delivered)",
+                self.row_bytes,
+            )));
+        }
+        Ok(true)
+    }
+
     /// Convenience: drain the remaining body, accumulating every row
     /// into a flat row-major `Vec<u16>` of length `width * height * 4`.
+    ///
+    /// # DoS hardening
+    ///
+    /// The output buffer is grown **one row at a time** and each row's
+    /// on-disk bytes are read with a length-bounded read, so peak
+    /// allocation tracks the body bytes the reader actually delivers —
+    /// never the header's *announced* `width * height * 4` sample count.
+    /// The reader works on an arbitrary [`Read`] and can't know the true
+    /// remaining input length up front, so neither a 16-byte file
+    /// announcing `width = height = 0x10000` (~34 GB of samples) nor a
+    /// 21-byte file announcing a `width = 0x29000000` row (~5.5 GB per
+    /// row) may force a giant allocation: both fail as a truncation
+    /// error on the first short row read, having allocated only the few
+    /// body bytes that were genuinely present.
     pub fn read_all_rows(&mut self) -> Result<Vec<u16>> {
-        let total_samples = (self.header.width as usize)
+        // Validate the announced sample count fits in `usize` so callers
+        // get the explicit overflow error rather than a panic, but do
+        // NOT allocate it eagerly.
+        let _total_samples = (self.header.width as usize)
             .checked_mul(self.header.height as usize)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| FarbfeldError::invalid("farbfeld stream: total samples overflow"))?;
-        let mut out = vec![0u16; total_samples];
         let row_samples = (self.header.width as usize) * 4;
+        // Zero-width images carry no body whatever the height, so there
+        // is nothing to read. Short-circuit instead of looping `height`
+        // (up to 2^32) times doing no work — a 16-byte file announcing
+        // `width = 0, height = u32::MAX` would otherwise spin billions
+        // of empty iterations (a CPU-time DoS).
         if row_samples == 0 {
-            // Width=0 — drain every row (no body bytes) so rows_read
-            // reflects the height.
-            while self.read_row(&mut [])? {}
-            return Ok(out);
+            self.rows_read = self.header.height;
+            return Ok(Vec::new());
         }
-        for row_idx in 0..self.header.height as usize {
-            let off = row_idx * row_samples;
-            let row_slice = &mut out[off..off + row_samples];
-            let got = self.read_row(row_slice)?;
-            if !got {
-                return Err(FarbfeldError::invalid(format!(
-                    "farbfeld stream: read_all_rows short — got {row_idx} of {} rows",
-                    self.header.height,
-                )));
+        // Grow `out` row-by-row, decoding directly from the bounded
+        // `row_buf` read so no full-width scratch buffer is allocated
+        // ahead of the body bytes. Honour any rows already consumed via
+        // `read_row` by draining from `rows_read` to `height`.
+        let mut out: Vec<u16> = Vec::new();
+        while self.rows_read < self.header.height {
+            // `read_row_bytes` returns false only for the zero-width
+            // (no body) case; the row is still counted toward `height`.
+            if self.read_row_bytes()? {
+                out.reserve(row_samples);
+                for i in 0..row_samples {
+                    let off = i * 2;
+                    out.push(u16::from_be_bytes([
+                        self.row_buf[off],
+                        self.row_buf[off + 1],
+                    ]));
+                }
             }
+            self.rows_read += 1;
         }
         Ok(out)
     }
