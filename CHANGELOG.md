@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.3](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.2...v0.0.3) - 2026-05-24
+
+### Other
+
+- add cargo-fuzz decode target + fix 3 streaming DoS amplifications
+- Round 77: streaming reader/writer, DoS hardening, magick cross-validator
+
 ### Added
 
 - `FarbfeldStreamReader` / `FarbfeldStreamWriter`: row-at-a-time
