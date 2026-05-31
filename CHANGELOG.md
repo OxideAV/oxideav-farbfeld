@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- Criterion micro-benchmark suite (`benches/codec.rs`). Six groups —
+  `parse_whole`, `encode_raw_be`, `encode_from_rgba16`, `encode_image`,
+  `stream_read_all_rows`, `stream_write_all_rows` — each parameterised
+  over three image sizes (64×64, 256×256, 1024×1024) so future changes
+  to the parse / encode / streaming paths can be regression-checked on
+  both per-call constant cost and per-byte throughput in one run. Wired
+  via a `[dev-dependencies]` Criterion with default features disabled
+  and a `[[bench]] harness = false` entry, so `cargo build` /
+  `cargo test` of the library itself stays lean.
+
 ## [0.0.3](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.2...v0.0.3) - 2026-05-24
 
 ### Other

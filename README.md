@@ -38,6 +38,26 @@ zero-width case looped `height` (up to 2³²) empty iterations. Each is now
 bounded by the bytes actually delivered; regression tests live in
 `tests/dos_hardening.rs`.
 
+Round 4 added a Criterion micro-benchmark suite (`benches/codec.rs`)
+covering both the in-memory and streaming codecs across three image
+sizes (64×64, 256×256, 1024×1024). Six bench groups exercise the six
+public encode/parse entry points so future changes can spot regressions
+on either path. Reference numbers on the development machine (release
+build, `cargo bench --bench codec -- --quick`, single sample):
+
+| Group at 1024×1024            | Throughput (4 MiB body) |
+|-------------------------------|-------------------------|
+| `parse_whole`                 | ~3.7 GiB/s              |
+| `encode_raw_be`               | ~70 GiB/s (memcpy-bound) |
+| `encode_from_rgba16`          | ~5.3 GiB/s              |
+| `encode_image`                | ~5.0 GiB/s              |
+| `stream_read_all_rows`        | ~2.5 GiB/s              |
+| `stream_write_all_rows`       | ~7.5 GiB/s              |
+
+Run with `cargo bench -p oxideav-farbfeld` (or
+`cargo bench -p oxideav-farbfeld -- parse_whole` to scope to one
+group).
+
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
 | Parse (whole-file)              | full                              |
