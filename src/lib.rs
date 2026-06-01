@@ -1,7 +1,7 @@
 //! Pure-Rust farbfeld reader/writer.
 //!
-//! farbfeld is suckless's minimalist lossless image format. The
-//! `farbfeld(5)` man page is the entire spec; in summary:
+//! farbfeld is a minimalist lossless image format. The entire spec
+//! fits in a single man page; in summary:
 //!
 //! ```text
 //!   bytes  field

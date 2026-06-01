@@ -17,8 +17,8 @@ use oxideav_farbfeld::{
 };
 
 /// Build a synthetic farbfeld file by hand — the parser/encoder under
-/// test are NOT used here. Mirrors the on-disk layout in the
-/// `farbfeld(5)` man page byte-for-byte.
+/// test are NOT used here. Mirrors the on-disk byte layout from
+/// `docs/image/farbfeld/farbfeld-format.md` exactly.
 fn synthesise_reference(width: u32, height: u32, samples_be: &[[u16; 4]]) -> Vec<u8> {
     assert_eq!(samples_be.len(), (width as usize) * (height as usize));
     let mut buf = Vec::with_capacity(HEADER_LEN + samples_be.len() * BYTES_PER_PIXEL);

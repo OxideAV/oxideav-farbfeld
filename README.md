@@ -2,16 +2,15 @@
 
 Pure-Rust farbfeld reader/writer.
 
-[farbfeld](http://tools.suckless.org/farbfeld/) is suckless's minimalist
-lossless image format: 16 bytes of header followed by 8 bytes per pixel
-(four 16-bit big-endian channels in `R, G, B, A` order, row-major). No
-compression, no metadata, no animation. The complete spec lives in the
-public `farbfeld(5)` man page.
+farbfeld is a minimalist lossless image format: 16 bytes of header
+followed by 8 bytes per pixel (four 16-bit big-endian channels in
+`R, G, B, A` order, row-major). No compression, no metadata, no
+animation. The complete spec fits on a single man page.
 
 This crate is part of the [OxideAV](https://github.com/OxideAV)
-workspace and was written from scratch against that man page — no
-suckless source, no third-party Rust farbfeld crate, and no `image`
-crate's farbfeld submodule were consulted.
+workspace and was written from scratch against an independently-authored
+factual description of the byte layout
+(`docs/image/farbfeld/farbfeld-format.md`).
 
 ## Status
 
@@ -42,8 +41,21 @@ Round 4 added a Criterion micro-benchmark suite (`benches/codec.rs`)
 covering both the in-memory and streaming codecs across three image
 sizes (64×64, 256×256, 1024×1024). Six bench groups exercise the six
 public encode/parse entry points so future changes can spot regressions
-on either path. Reference numbers on the development machine (release
-build, `cargo bench --bench codec -- --quick`, single sample):
+on either path. Round 5 added a deterministic property-style sweep
+(`tests/property_sweep.rs`): 96 pseudo-random `(width, height, pixels)`
+triples per shape distribution × six distributions (tiny, square,
+tall-narrow, wide-short, zero-axis, medium) each assert the eight
+spec-mandated invariants — lossless roundtrip, exact size, header echo,
+encoder determinism, three-encoder-path agreement, streaming /
+whole-file agreement, idempotent re-encode, and peek / decode
+agreement. Four malformed-input scenarios (arbitrary bytes never panic,
+corrupted magic always rejected, trailing garbage always rejected,
+truncated body always rejected) run additional PRNG-driven sweeps.
+The sweep is offline / no-extra-dep (xorshift32 inlined) so any
+failure is reproducible from the seed printed in the assertion.
+
+Reference numbers on the development machine (release build,
+`cargo bench --bench codec -- --quick`, single sample):
 
 | Group at 1024×1024            | Throughput (4 MiB body) |
 |-------------------------------|-------------------------|
@@ -70,6 +82,7 @@ group).
 | Container mux                   | full                              |
 | DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes |
 | Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
+| Property sweep (PRNG)           | 8 invariants × 6 shape distributions × 96 iters + 4 malformed-input scenarios |
 
 ## API
 

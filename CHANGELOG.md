@@ -18,6 +18,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   via a `[dev-dependencies]` Criterion with default features disabled
   and a `[[bench]] harness = false` entry, so `cargo build` /
   `cargo test` of the library itself stays lean.
+- Deterministic property-style sweep (`tests/property_sweep.rs`): 96
+  pseudo-random `(width, height, pixels)` triples per shape
+  distribution × six distributions (tiny, square, tall-narrow,
+  wide-short, zero-axis, medium) assert the eight spec-mandated
+  invariants — lossless roundtrip, exact size identity, header echo,
+  encoder determinism, three-encoder-path byte-agreement, streaming /
+  whole-file byte-agreement, idempotent re-encode, and header-peek /
+  whole-file decode agreement. Four malformed-input scenarios
+  (arbitrary bytes never panic, corrupted magic always rejected,
+  trailing garbage always rejected, truncated body always rejected)
+  run additional PRNG-driven sweeps. Uses an inline xorshift32 PRNG
+  so the sweep stays offline / no-extra-dep, and every assertion
+  prints its seed so any future failure is reproducible.
+
+### Changed
+
+- README, `lib.rs` module doc, `roundtrip.rs` comment, and
+  `Cargo.toml` description rephrased to reference the workspace's own
+  factual byte-layout description at
+  `docs/image/farbfeld/farbfeld-format.md` instead of external
+  reference points.
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.2...v0.0.3) - 2026-05-24
 
