@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Encode-side `cargo-fuzz` target (`fuzz/fuzz_targets/encode.rs`).
+  Interprets the fuzz bytes as a `(width, height, body)` triple
+  bounded to 64×64 (16 KiB body cap per execution) and drives all
+  three whole-file encoder entry points (`encode_farbfeld`,
+  `encode_farbfeld_from_rgba16`, `encode_farbfeld_image`) plus
+  `FarbfeldStreamWriter` row-by-row. Asserts six invariants per
+  input — no panics, three-encoder byte-agreement, streaming-writer-
+  equals-whole-file byte-agreement, lossless parse roundtrip, exact
+  `HEADER_LEN + w*h*8` size identity, and ASCII-magic / dimension
+  header echo — plus two rejection probes (a body 1 byte short /
+  1 byte long must reject; calling `FarbfeldStreamWriter::finish`
+  before any row is written must reject). Complement to the
+  pre-existing decode-side fuzz target. 601 312 executions / 61 s
+  clean on the current build.
 - Criterion micro-benchmark suite (`benches/codec.rs`). Six groups —
   `parse_whole`, `encode_raw_be`, `encode_from_rgba16`, `encode_image`,
   `stream_read_all_rows`, `stream_write_all_rows` — each parameterised

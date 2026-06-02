@@ -9,15 +9,22 @@ cargo-fuzz = true
 
 # farbfeld is a fixed-layout container (8-byte magic + two BE u32
 # dimensions + width*height*4 BE u16 samples). The decode surface is
-# `parse_farbfeld` / `parse_farbfeld_header` / the streaming reader —
-# all pure byte-slice / io::Read parsers with no external dependency to
-# cross-decode against. This fuzz crate exercises the decoder against
-# arbitrary attacker bytes (it must never panic) and, on the inputs that
-# parse, checks the lossless re-encode roundtrip.
+# `parse_farbfeld` / `parse_farbfeld_header` / the streaming reader;
+# the encode surface is `encode_farbfeld` (pre-serialised BE body) +
+# `encode_farbfeld_from_rgba16` (native-endian pixels) +
+# `encode_farbfeld_image` (flat plane) + `FarbfeldStreamWriter`. Both
+# halves are pure byte-slice / io::Read / io::Write code with no
+# external dependency to cross-check against. This fuzz crate ships
+# two targets: `decode` exercises the parser against arbitrary attacker
+# bytes (must never panic) and checks the lossless re-encode roundtrip
+# on inputs that parse; `encode` exercises the three whole-file encoder
+# entry points plus the streaming writer against pseudo-random
+# `(width, height, body)` triples and asserts they all agree byte-for-
+# byte and roundtrip cleanly through the parser.
 #
 # The harness builds against the standalone (no `oxideav-core`) API:
 # `default-features = false` drops the framework dependency so the fuzz
-# target compiles and links the parser/encoder directly.
+# targets compile and link the parser/encoder directly.
 
 [dependencies]
 libfuzzer-sys = "0.4"
@@ -40,5 +47,11 @@ debug = 1
 [[bin]]
 name = "decode"
 path = "fuzz_targets/decode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "encode"
+path = "fuzz_targets/encode.rs"
 test = false
 doc = false

@@ -37,6 +37,19 @@ zero-width case looped `height` (up to 2³²) empty iterations. Each is now
 bounded by the bytes actually delivered; regression tests live in
 `tests/dos_hardening.rs`.
 
+Round 6 added the symmetric encode-side fuzz target
+(`fuzz/fuzz_targets/encode.rs`). The fuzz bytes are interpreted as
+`(width, height, body)` triples bounded to 64×64 (16 KiB body cap per
+execution, well inside libFuzzer's iteration budget) and every input
+drives all three whole-file encoder entry points (`encode_farbfeld`,
+`encode_farbfeld_from_rgba16`, `encode_farbfeld_image`) plus
+`FarbfeldStreamWriter` row-by-row. Six invariants are asserted on every
+input: no-panics, three-encoder agreement, streaming-writer-equals-
+whole-file agreement, lossless parse roundtrip, exact-size identity, and
+header echo. Each input also probes two rejection paths (one-byte-short
+and one-byte-long body lengths must reject; premature `finish` must
+reject). 601 312 executions / 61 s clean against the new corpus.
+
 Round 4 added a Criterion micro-benchmark suite (`benches/codec.rs`)
 covering both the in-memory and streaming codecs across three image
 sizes (64×64, 256×256, 1024×1024). Six bench groups exercise the six
@@ -82,6 +95,7 @@ group).
 | Container mux                   | full                              |
 | DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes |
 | Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
+| Fuzzing (encode)                | `cargo-fuzz` target (3 whole-file paths + streaming writer agree, 6 invariants + 2 rejection probes), 601 312 runs / 61 s clean |
 | Property sweep (PRNG)           | 8 invariants × 6 shape distributions × 96 iters + 4 malformed-input scenarios |
 
 ## API
