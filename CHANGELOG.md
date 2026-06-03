@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FarbfeldStreamReader::skip_row` + `skip_rows(n)`: row-window decode
+  primitives that consume exactly `width * 8` body bytes per row from
+  the underlying reader without performing the per-sample big-endian
+  to native-endian decode. Useful for thumbnail / scan-line-window
+  callers that want rows N..M of a multi-gigapixel stream without
+  paying the conversion cost for rows they'll discard. `skip_rows`
+  caps at [`rows_remaining`](FarbfeldStreamReader::rows_remaining) so
+  asking past the end returns the count actually skipped instead of
+  an error. Both methods inherit the same length-bounded `Read::take`
+  discipline as `read_row`, so a header announcing a multi-gigabyte
+  row width but shipping no body still surfaces as a truncation
+  error without forcing the announced-width allocation.
 - `peek_farbfeld_dimensions(bytes)`: top-level convenience that decodes
   the 16-byte farbfeld header off the front of `bytes` without
   touching the body. Useful for sandboxes that want to refuse

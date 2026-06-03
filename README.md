@@ -49,6 +49,20 @@ documentation, treated as link-only per this workspace's clean-room
 policy) to the workspace's own independent factual byte-layout
 description at `docs/image/farbfeld/farbfeld-format.md`.
 
+Round 8 added row-window decode primitives to the streaming reader —
+[`FarbfeldStreamReader::skip_row`] consumes exactly `width * 8` body
+bytes without performing the per-sample big-endian decode (advancing
+[`FarbfeldStreamReader::rows_read`] by one), and `skip_rows(n)` caps
+at the rows remaining instead of erroring past the end. The two are
+the symmetric counterpart to [`FarbfeldStreamReader::read_row`] for
+callers that only want rows N..M of a multi-gigapixel stream (thumbnail
+row, scan-line inspection, partial decode) and don't want to pay the
+conversion cost for rows they'll discard. Both inherit the same
+length-bounded `Read::take` discipline as `read_row`, so a malicious
+header announcing a multi-gigabyte row width but shipping no body still
+surfaces as a truncation error without forcing the announced-width
+allocation.
+
 Round 6 added the symmetric encode-side fuzz target
 (`fuzz/fuzz_targets/encode.rs`). The fuzz bytes are interpreted as
 `(width, height, body)` triples bounded to 64×64 (16 KiB body cap per
@@ -98,7 +112,7 @@ group).
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
 | Parse (whole-file)              | full                              |
-| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader`     |
+| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader` (incl. `skip_row` / `skip_rows`) |
 | Encode (whole-file)             | full                              |
 | Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter`    |
 | Round-trip (self)               | exact                             |

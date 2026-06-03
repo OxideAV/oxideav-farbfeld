@@ -96,6 +96,68 @@ impl<R: Read> FarbfeldStreamReader<R> {
         self.header.height.saturating_sub(self.rows_read)
     }
 
+    /// Skip the next body row without decoding its samples.
+    ///
+    /// Consumes exactly `width * 8` bytes from the underlying reader
+    /// (the bytes a single row occupies on disk) and advances
+    /// [`rows_read`](Self::rows_read) by one. The row data is
+    /// discarded — no `u16` decoding happens. Symmetric to
+    /// [`read_row`](Self::read_row) for callers that only want a
+    /// row-window from a much larger image (thumbnail row, scan-line
+    /// inspection, partial decode) and don't want to pay the
+    /// per-sample big-endian conversion cost for rows they'll discard.
+    ///
+    /// Returns:
+    /// * `Ok(true)` if a row's worth of bytes was skipped.
+    /// * `Ok(false)` if all `height` rows have already been consumed.
+    /// * [`FarbfeldError::InvalidData`] if the underlying reader yields
+    ///   fewer than `width * 8` bytes for the row (truncated file).
+    ///
+    /// The skip uses the same length-bounded [`Read::take`] discipline
+    /// as [`read_row`](Self::read_row), so a malicious header announcing
+    /// a multi-gigabyte row width but shipping no body still surfaces
+    /// as a truncation error without forcing the announced-width
+    /// allocation.
+    pub fn skip_row(&mut self) -> Result<bool> {
+        if self.rows_read >= self.header.height {
+            return Ok(false);
+        }
+        // `read_row_bytes` runs the same bounded `Read::take` /
+        // `read_to_end` discipline used by `read_row`; the row bytes
+        // are then simply not converted to `u16` samples.
+        let _ = self.read_row_bytes()?;
+        self.rows_read += 1;
+        Ok(true)
+    }
+
+    /// Skip the next `n` rows of the body, or as many rows as remain if
+    /// `n` exceeds [`rows_remaining`](Self::rows_remaining).
+    ///
+    /// Returns the number of rows actually skipped (capped at
+    /// `rows_remaining` before this call). A return value smaller than
+    /// `n` is therefore not an error — it's the normal "skipped past
+    /// the end" outcome and mirrors the `Ok(false)` shape of
+    /// [`skip_row`](Self::skip_row).
+    ///
+    /// Each skipped row still consumes `width * 8` bytes from the
+    /// underlying reader, so the same truncation contract as
+    /// [`skip_row`](Self::skip_row) applies: a short read on any of the
+    /// skipped rows surfaces as [`FarbfeldError::InvalidData`].
+    pub fn skip_rows(&mut self, n: u32) -> Result<u32> {
+        let want = n.min(self.rows_remaining());
+        let mut done = 0u32;
+        while done < want {
+            // `skip_row` cannot return `Ok(false)` here because we've
+            // capped `want` at `rows_remaining` up front, but propagate
+            // any truncation error as-is.
+            if !self.skip_row()? {
+                break;
+            }
+            done += 1;
+        }
+        Ok(done)
+    }
+
     /// Read the next row of the body into `out`.
     ///
     /// `out` must be exactly `width * 4` `u16` slots long: each pixel
@@ -517,6 +579,131 @@ mod tests {
         let mut writer = FarbfeldStreamWriter::new(Vec::new(), 3, 1).unwrap();
         let too_short = [0u16; 8]; // need 12.
         assert!(writer.write_row(&too_short).is_err());
+    }
+
+    #[test]
+    fn skip_row_advances_rows_read_without_decoding() {
+        // 3×4 image — each row is `width*8 = 24` body bytes. We skip
+        // the first two rows then read the third and confirm the read
+        // returns exactly the third row's samples.
+        let mut samples = Vec::new();
+        for y in 0..4u32 {
+            for x in 0..3u32 {
+                let v = (y * 100 + x * 10) as u16;
+                samples.push(v);
+                samples.push(v.wrapping_add(1));
+                samples.push(v.wrapping_add(2));
+                samples.push(v.wrapping_add(3));
+            }
+        }
+        let bytes = synth(3, 4, &samples);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+
+        // Skip row 0 and row 1.
+        assert!(reader.skip_row().unwrap());
+        assert_eq!(reader.rows_read(), 1);
+        assert_eq!(reader.rows_remaining(), 3);
+        assert!(reader.skip_row().unwrap());
+        assert_eq!(reader.rows_read(), 2);
+
+        // Now decode row 2 — must match samples[24..36] (12 samples).
+        let mut row = vec![0u16; 12];
+        assert!(reader.read_row(&mut row).unwrap());
+        assert_eq!(row, &samples[24..36]);
+
+        // Decode row 3 — last row.
+        assert!(reader.read_row(&mut row).unwrap());
+        assert_eq!(row, &samples[36..48]);
+
+        // Past end — both skip_row and read_row return Ok(false).
+        assert!(!reader.skip_row().unwrap());
+        assert!(!reader.read_row(&mut row).unwrap());
+    }
+
+    #[test]
+    fn skip_row_handles_zero_width() {
+        // 0×3 — three zero-byte rows; skip_row must still count them.
+        let bytes = synth(0, 3, &[]);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        for i in 0..3u32 {
+            assert!(reader.skip_row().unwrap());
+            assert_eq!(reader.rows_read(), i + 1);
+        }
+        assert!(!reader.skip_row().unwrap());
+    }
+
+    #[test]
+    fn skip_row_propagates_truncated_body() {
+        // 2×2 (= 32 body bytes) but only 8 bytes of body present.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 8]); // half of one row
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        // First row needs 16 bytes; only 8 present — truncation.
+        let err = reader.skip_row().unwrap_err();
+        let FarbfeldError::InvalidData(s) = err;
+        assert!(s.contains("truncated"), "msg = {s:?}");
+    }
+
+    #[test]
+    fn skip_rows_caps_at_remaining() {
+        // 1×3 image — ask to skip 100 rows; expect to skip 3.
+        let samples = vec![0u16; 3 * 4];
+        let bytes = synth(1, 3, &samples);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        let skipped = reader.skip_rows(100).unwrap();
+        assert_eq!(skipped, 3);
+        assert_eq!(reader.rows_read(), 3);
+        assert_eq!(reader.rows_remaining(), 0);
+        // Subsequent skip_rows on an exhausted reader returns 0.
+        assert_eq!(reader.skip_rows(5).unwrap(), 0);
+    }
+
+    #[test]
+    fn skip_rows_zero_is_a_noop() {
+        let samples = vec![0u16; 2 * 2 * 4];
+        let bytes = synth(2, 2, &samples);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(reader.skip_rows(0).unwrap(), 0);
+        assert_eq!(reader.rows_read(), 0);
+        // Reader is still fully usable — full read_all_rows must work.
+        let drained = reader.read_all_rows().unwrap();
+        assert_eq!(drained.len(), 2 * 2 * 4);
+    }
+
+    #[test]
+    fn skip_rows_then_read_remaining_matches_full_decode() {
+        // Decode "skip first 2 rows of a 4-row image, then read the
+        // remaining 2" and check the result matches the corresponding
+        // tail of a full decode.
+        let w = 5u32;
+        let h = 4u32;
+        let mut samples = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * w + x) as u16;
+                samples.push(v.wrapping_mul(0x0123));
+                samples.push(v.wrapping_mul(0x4567));
+                samples.push(v.wrapping_mul(0x89AB));
+                samples.push(v.wrapping_mul(0xCDEF));
+            }
+        }
+        let bytes = synth(w, h, &samples);
+
+        // Full decode for reference.
+        let mut full_reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
+        let full = full_reader.read_all_rows().unwrap();
+
+        // Skip-then-read-tail decode.
+        let mut win_reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        assert_eq!(win_reader.skip_rows(2).unwrap(), 2);
+        assert_eq!(win_reader.rows_read(), 2);
+        let tail = win_reader.read_all_rows().unwrap();
+
+        let row_samples = (w * 4) as usize;
+        assert_eq!(tail, full[row_samples * 2..]);
     }
 
     #[test]

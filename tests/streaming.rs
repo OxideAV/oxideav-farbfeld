@@ -122,6 +122,37 @@ fn streaming_reader_truncated_at_first_row_is_an_error() {
 }
 
 #[test]
+fn streaming_reader_skip_rows_then_read_matches_in_memory_tail() {
+    // Build a 32×16 image (2 048 samples), then with the streaming
+    // reader skip the first 9 rows and read the remaining 7. The
+    // pixel buffer must equal the corresponding tail of `parse_farbfeld`.
+    let w = 32u32;
+    let h = 16u32;
+    let samples = make_samples(w, h);
+    let mut pairs: Vec<[u16; 4]> = Vec::with_capacity((w * h) as usize);
+    for chunk in samples.chunks_exact(4) {
+        pairs.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
+    }
+    let bytes = encode_farbfeld_from_rgba16(w, h, &pairs).unwrap();
+    let full = parse_farbfeld(&bytes).unwrap();
+
+    let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+    let skipped = reader.skip_rows(9).unwrap();
+    assert_eq!(skipped, 9);
+    assert_eq!(reader.rows_read(), 9);
+
+    // Drain the remaining 7 rows with read_row (NOT read_all_rows) to
+    // exercise the per-row mix path.
+    let row_samples = (w * 4) as usize;
+    let mut tail: Vec<u16> = Vec::with_capacity(row_samples * 7);
+    let mut row = vec![0u16; row_samples];
+    while reader.read_row(&mut row).unwrap() {
+        tail.extend_from_slice(&row);
+    }
+    assert_eq!(tail, full.pixels[row_samples * 9..]);
+}
+
+#[test]
 fn streaming_reader_extra_trailing_bytes_are_observable_via_into_inner() {
     // The streaming reader doesn't reject trailing bytes (that's the
     // streaming contract — it only knows about the announced body).
