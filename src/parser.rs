@@ -176,19 +176,48 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
 
     // Body length matches the header; safe to allocate the pixel buffer
     // at full capacity. Each pixel is 4 u16 samples, 8 bytes on disk.
+    //
+    // Hot path: instead of `push`-ing one u16 at a time inside an
+    // index-and-decode loop (which the optimiser tends not to vectorise
+    // because of the in-bounds proof on each `body[off]`), allocate the
+    // sample buffer up front with `resize` and walk it in lockstep with
+    // `body.chunks_exact(2)`. The compiler then sees two `&[u8; 2]`-
+    // shaped slices joined by `zip` and can hoist the `from_be_bytes`
+    // into a single 16-bit byte-swap per pair, which the auto-vectoriser
+    // turns into a SIMD bswap (8 samples / 16 bytes per cycle on
+    // contemporary x86_64 / aarch64).
     let body = &bytes[HEADER_LEN..];
     let sample_count = header.body_len / 2;
-    let mut pixels = Vec::with_capacity(sample_count);
-    for i in 0..sample_count {
-        let off = i * 2;
-        pixels.push(u16::from_be_bytes([body[off], body[off + 1]]));
-    }
+    let mut pixels = vec![0u16; sample_count];
+    decode_be_samples(body, &mut pixels);
 
     Ok(FarbfeldImage {
         width: header.width,
         height: header.height,
         pixels,
     })
+}
+
+/// Decode `body` (a `2 * out.len()`-byte big-endian u16 plane) into
+/// `out`'s slots, in lockstep.
+///
+/// Factored out so [`parse_farbfeld`] and the streaming reader can share
+/// the same hot loop. The shape — `chunks_exact(2)` zipped with a
+/// `&mut [u16]` — is the one the auto-vectoriser picks up; per-iteration
+/// bounds proofs are discharged by `chunks_exact`'s static length, so
+/// the inner body collapses to `u16::from_be_bytes` on a `[u8; 2]` slot
+/// and a single store.
+///
+/// Caller's contract: `body.len() == out.len() * 2`. The function will
+/// only fill min(out.len(), body.len() / 2) slots if the contract is
+/// violated; it does not panic.
+#[inline]
+pub(crate) fn decode_be_samples(body: &[u8], out: &mut [u16]) {
+    for (chunk, slot) in body.chunks_exact(2).zip(out.iter_mut()) {
+        // `chunks_exact` yields `&[u8]` of guaranteed length 2; the
+        // `try_into` is a const-time copy the optimiser sees through.
+        *slot = u16::from_be_bytes([chunk[0], chunk[1]]);
+    }
 }
 
 #[cfg(test)]
@@ -362,6 +391,41 @@ mod tests {
         // input — the cross-check between announced size and bytes
         // present is the parser's contract.
         assert!(parse_farbfeld(&buf).is_err());
+    }
+
+    #[test]
+    fn decode_be_samples_handles_unit_size_and_long_runs() {
+        // Smallest non-empty: one sample.
+        let mut out = [0u16; 1];
+        decode_be_samples(&[0x12, 0x34], &mut out);
+        assert_eq!(out, [0x1234]);
+
+        // Long run — every u16 from 0..1024.
+        let bytes: Vec<u8> = (0..1024u16).flat_map(|v| v.to_be_bytes()).collect();
+        let mut out = vec![0u16; 1024];
+        decode_be_samples(&bytes, &mut out);
+        assert_eq!(out, (0..1024u16).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn decode_be_samples_zero_length_is_a_noop() {
+        // Empty body / empty output — both must be accepted without
+        // panicking. (Zero-pixel farbfeld images take this branch.)
+        let mut out: [u16; 0] = [];
+        decode_be_samples(&[], &mut out);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn decode_be_samples_caps_at_smaller_side_without_panic() {
+        // Body has 4 bytes (= 2 u16s) but `out` has 4 slots. Per the
+        // helper's contract the call only fills the lockstep prefix and
+        // does NOT panic on the asymmetric case — leftover slots stay
+        // at their pre-existing value, which keeps the helper crash-
+        // safe in any future caller that violates the precondition.
+        let mut out = [0xFFFFu16; 4];
+        decode_be_samples(&[0x12, 0x34, 0x56, 0x78], &mut out);
+        assert_eq!(out, [0x1234, 0x5678, 0xFFFF, 0xFFFF]);
     }
 
     #[test]

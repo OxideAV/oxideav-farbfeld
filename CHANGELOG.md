@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Hot-path codec loops auto-vectorised. The per-sample big-endian byte
+  swap on the five non-memcpy entry points — `parse_farbfeld`,
+  `encode_farbfeld_from_rgba16`, `encode_farbfeld_image`,
+  `FarbfeldStreamReader::{read_row, read_all_rows}`,
+  `FarbfeldStreamWriter::write_row` — now routes through two shared
+  internal helpers (`decode_be_samples` / `encode_be_samples`) that
+  walk the input as `chunks_exact(2)` / `chunks_exact_mut(2)` in
+  lockstep with the output. The lockstep shape lets the auto-vectoriser
+  emit a SIMD bswap (PSHUFB on x86_64, REV16 on aarch64) instead of
+  the scalar per-sample `from_be_bytes` / `to_be_bytes` loop the
+  previous code generated. Measured speedup on the 1024×1024
+  release-build bench: `parse_whole` ~3.6 → ~39 GiB/s,
+  `encode_from_rgba16` ~5.4 → ~47 GiB/s, `encode_image` ~4.7 → ~46
+  GiB/s, `stream_read_all_rows` ~2.3 → ~8 GiB/s,
+  `stream_write_all_rows` ~7.9 → ~10 GiB/s. `encode_raw_be` stays at
+  the ~78 GiB/s memcpy ceiling. The whole-image encoders also build
+  their output into a pre-sized `Vec<u8>` and write the 16-byte header
+  with three `copy_from_slice` calls instead of three growing
+  `extend_from_slice` calls, removing the small per-call overhead the
+  64×64 numbers were dominated by. New unit tests cover the helpers'
+  unit-length, long-run, empty, and asymmetric-input edges, plus a
+  parse/encode inversion check on every `u16` 0..1024 and a
+  `[[u16; 4]] -> [u16]` cast aliasing check at every offset.
+
 ### Added
 
 - `FarbfeldStreamReader::skip_row` + `skip_rows(n)`: row-window decode

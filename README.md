@@ -93,17 +93,33 @@ truncated body always rejected) run additional PRNG-driven sweeps.
 The sweep is offline / no-extra-dep (xorshift32 inlined) so any
 failure is reproducible from the seed printed in the assertion.
 
-Reference numbers on the development machine (release build,
-`cargo bench --bench codec -- --quick`, single sample):
+Round 9 hoisted the per-sample big-endian byte swap on the five
+non-memcpy hot paths into two shared internal helpers
+(`decode_be_samples` / `encode_be_samples`) that walk the input as
+`chunks_exact(2)` / `chunks_exact_mut(2)` in lockstep with the output,
+which the auto-vectoriser turns into a SIMD bswap. The whole-image
+encoder (`encode_farbfeld_image`) and the `[[u16; 4]]`-shaped
+convenience encoder (`encode_farbfeld_from_rgba16`) now also build
+their output into a pre-sized `Vec<u8>` and `copy_from_slice` the
+16-byte header in one store instead of three `extend_from_slice`
+calls, removing the four-times-per-pixel push that previously kept
+the loop scalar. The `[[u16; 4]] -> [u16]` cast that lets the
+convenience encoder share the same flat hot loop is a pure-Rust
+borrow-reinterpret (no extra crate dep, layout argument written out
+in the source), and the new shared helpers carry unit tests for the
+unit-length, long-run, empty, and asymmetric-input edges plus a
+parse/encode inversion check. Measured speedups on the
+1024×1024 release-build bench (4 MiB body, single sample,
+`cargo bench --bench codec -- --quick`):
 
-| Group at 1024×1024            | Throughput (4 MiB body) |
-|-------------------------------|-------------------------|
-| `parse_whole`                 | ~3.7 GiB/s              |
-| `encode_raw_be`               | ~70 GiB/s (memcpy-bound) |
-| `encode_from_rgba16`          | ~5.3 GiB/s              |
-| `encode_image`                | ~5.0 GiB/s              |
-| `stream_read_all_rows`        | ~2.5 GiB/s              |
-| `stream_write_all_rows`       | ~7.5 GiB/s              |
+| Group at 1024×1024            | Throughput (4 MiB body)    |
+|-------------------------------|----------------------------|
+| `parse_whole`                 | ~39 GiB/s (was ~3.6 GiB/s) |
+| `encode_raw_be`               | ~78 GiB/s (memcpy-bound)   |
+| `encode_from_rgba16`          | ~47 GiB/s (was ~5.4 GiB/s) |
+| `encode_image`                | ~46 GiB/s (was ~4.7 GiB/s) |
+| `stream_read_all_rows`        | ~8 GiB/s (was ~2.3 GiB/s)  |
+| `stream_write_all_rows`       | ~10 GiB/s (was ~7.9 GiB/s) |
 
 Run with `cargo bench -p oxideav-farbfeld` (or
 `cargo bench -p oxideav-farbfeld -- parse_whole` to scope to one

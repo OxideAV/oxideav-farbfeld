@@ -19,6 +19,24 @@ use crate::error::{FarbfeldError, Result};
 use crate::image::FarbfeldImage;
 use crate::parser::{BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
 
+/// Serialise a flat row-major plane of native-endian `u16` samples
+/// (`R, G, B, A` repeated per pixel) into a big-endian byte body
+/// pre-allocated by the caller.
+///
+/// Caller's contract: `out.len() == samples.len() * 2`. The function
+/// fills the buffer with the per-sample BE bytes and does no
+/// per-iteration bounds proof beyond the `chunks_exact_mut` guarantee,
+/// which the auto-vectoriser turns into a SIMD bswap on x86_64
+/// (`PSHUFB`) and aarch64 (`REV16`).
+#[inline]
+pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
+    for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
+        let be = sample.to_be_bytes();
+        slot[0] = be[0];
+        slot[1] = be[1];
+    }
+}
+
 /// Encode a farbfeld file from a raw, already-big-endian RGBA u16 body
 /// plane.
 ///
@@ -50,11 +68,11 @@ pub fn encode_farbfeld(width: u32, height: u32, rgba_u16_be: &[u8]) -> Result<Ve
         )));
     }
 
-    let mut out = Vec::with_capacity(HEADER_LEN + body_len);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&width.to_be_bytes());
-    out.extend_from_slice(&height.to_be_bytes());
-    out.extend_from_slice(rgba_u16_be);
+    let mut out = vec![0u8; HEADER_LEN + body_len];
+    out[..8].copy_from_slice(MAGIC);
+    out[8..12].copy_from_slice(&width.to_be_bytes());
+    out[12..16].copy_from_slice(&height.to_be_bytes());
+    out[HEADER_LEN..].copy_from_slice(rgba_u16_be);
     Ok(out)
 }
 
@@ -84,15 +102,18 @@ pub fn encode_farbfeld_from_rgba16(
     }
 
     let body_len = pixel_count * BYTES_PER_PIXEL;
-    let mut out = Vec::with_capacity(HEADER_LEN + body_len);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&width.to_be_bytes());
-    out.extend_from_slice(&height.to_be_bytes());
-    for px in pixels {
-        for chan in px {
-            out.extend_from_slice(&chan.to_be_bytes());
-        }
-    }
+    let mut out = vec![0u8; HEADER_LEN + body_len];
+    out[..8].copy_from_slice(MAGIC);
+    out[8..12].copy_from_slice(&width.to_be_bytes());
+    out[12..16].copy_from_slice(&height.to_be_bytes());
+    // Reinterpret `pixels` as a flat `&[u16]` view of the body (each
+    // `[u16; 4]` pixel is four consecutive samples) so we can run the
+    // shared SIMD-friendly `encode_be_samples` loop over the whole plane
+    // in one pass instead of four `extend_from_slice` calls per pixel.
+    // `pixel_count * 4` cannot overflow because `pixel_count *
+    // BYTES_PER_PIXEL` (= 8 ×) already succeeded just above.
+    let flat: &[u16] = flatten_rgba_pixels(pixels);
+    encode_be_samples(flat, &mut out[HEADER_LEN..]);
     Ok(out)
 }
 
@@ -119,14 +140,41 @@ pub fn encode_farbfeld_image(image: &FarbfeldImage) -> Result<Vec<u8>> {
     }
 
     let body_len = pixel_count * BYTES_PER_PIXEL;
-    let mut out = Vec::with_capacity(HEADER_LEN + body_len);
-    out.extend_from_slice(MAGIC);
-    out.extend_from_slice(&image.width.to_be_bytes());
-    out.extend_from_slice(&image.height.to_be_bytes());
-    for &sample in &image.pixels {
-        out.extend_from_slice(&sample.to_be_bytes());
-    }
+    let mut out = vec![0u8; HEADER_LEN + body_len];
+    out[..8].copy_from_slice(MAGIC);
+    out[8..12].copy_from_slice(&image.width.to_be_bytes());
+    out[12..16].copy_from_slice(&image.height.to_be_bytes());
+    encode_be_samples(&image.pixels, &mut out[HEADER_LEN..]);
     Ok(out)
+}
+
+/// View a `&[[u16; 4]]` pixel plane as a flat `&[u16]` sample plane,
+/// in-place, with no allocation.
+///
+/// Lets [`encode_farbfeld_from_rgba16`] route through the same SIMD-
+/// friendly `encode_be_samples` helper that the streaming writer and
+/// `encode_farbfeld_image` use — without the helper, the `[[u16; 4]]`
+/// input shape would force a per-pixel inner loop the optimiser
+/// wouldn't vectorise.
+///
+/// The cast is sound because:
+/// * `[u16; 4]` is a packed array of four `u16` values; Rust guarantees
+///   no padding inside a `[T; N]`, and the array's alignment is
+///   `align_of::<u16>()`. A `u16` slice over the same bytes therefore
+///   aliases the same samples 1:1.
+/// * The returned slice's lifetime is tied to the input borrow, so the
+///   pixel buffer stays alive for the whole encode call.
+/// * `pixels.len() * 4` cannot overflow at the call sites here: the
+///   pixel-count cross-check in [`encode_farbfeld_from_rgba16`]
+///   already proved `pixel_count * BYTES_PER_PIXEL` (= 8 ×) didn't
+///   overflow, so the 4 × form can't either.
+#[inline]
+fn flatten_rgba_pixels(pixels: &[[u16; 4]]) -> &[u16] {
+    // SAFETY: see the doc-comment above. `[u16; 4]`'s memory layout —
+    // four packed `u16` values, no niche, no discriminant, alignment of
+    // `u16` — is guaranteed by the language reference, so the resulting
+    // `&[u16]` of length `pixels.len() * 4` aliases the input bytes 1:1.
+    unsafe { core::slice::from_raw_parts(pixels.as_ptr() as *const u16, pixels.len() * 4) }
 }
 
 #[cfg(test)]
@@ -194,5 +242,115 @@ mod tests {
         // Caller says 2×2 (=4 pixels) but only passes 3.
         let pixels = [[0u16; 4]; 3];
         assert!(encode_farbfeld_from_rgba16(2, 2, &pixels).is_err());
+    }
+
+    #[test]
+    fn flatten_rgba_pixels_aliases_input_bytes_one_to_one() {
+        // The unsafe `[[u16; 4]] -> [u16]` cast underpins the SIMD-
+        // friendly `encode_be_samples` hot loop on
+        // `encode_farbfeld_from_rgba16`. Prove it observes the same
+        // samples in the same order, with no shuffling.
+        let pixels = [
+            [0x0001u16, 0x0002, 0x0003, 0x0004],
+            [0x0005, 0x0006, 0x0007, 0x0008],
+            [0x0009, 0x000A, 0x000B, 0x000C],
+        ];
+        let flat = flatten_rgba_pixels(&pixels);
+        assert_eq!(flat.len(), 12);
+        for (i, &sample) in flat.iter().enumerate() {
+            let px = i / 4;
+            let ch = i % 4;
+            assert_eq!(sample, pixels[px][ch], "sample {i}: pixel {px} chan {ch}");
+        }
+    }
+
+    #[test]
+    fn flatten_rgba_pixels_handles_empty_input() {
+        // Zero-length input is a degenerate but well-formed shape —
+        // a 0×0 image carries no pixels.
+        let pixels: [[u16; 4]; 0] = [];
+        let flat = flatten_rgba_pixels(&pixels);
+        assert!(flat.is_empty());
+    }
+
+    #[test]
+    fn encode_be_samples_byte_swap_inverts_decode_be_samples() {
+        // The shared hot-loop helpers are each other's inverse on every
+        // u16: encode_be_samples(samples, out); decode_be_samples(out,
+        // round) reproduces samples.
+        use crate::parser::decode_be_samples;
+        let samples: Vec<u16> = (0..1024u16).collect();
+        let mut bytes = vec![0u8; samples.len() * 2];
+        encode_be_samples(&samples, &mut bytes);
+        let mut round = vec![0u16; samples.len()];
+        decode_be_samples(&bytes, &mut round);
+        assert_eq!(round, samples);
+        // Spot-check the BE byte order on one sample.
+        assert_eq!(&bytes[0..2], &[0x00, 0x00]); // sample 0
+        assert_eq!(&bytes[2..4], &[0x00, 0x01]); // sample 1
+        assert_eq!(&bytes[510..512], &[0x00, 0xFF]); // sample 255
+        assert_eq!(&bytes[512..514], &[0x01, 0x00]); // sample 256
+    }
+
+    #[test]
+    fn encode_farbfeld_from_rgba16_bulk_path_matches_per_pixel_reference() {
+        // The optimised path routes through `flatten_rgba_pixels` +
+        // `encode_be_samples`. Cross-check against a pure-Rust per-pixel
+        // reference encoder that loops `to_be_bytes` to confirm byte
+        // identity at every offset.
+        let w = 17u32;
+        let h = 13u32;
+        let mut pixels = Vec::with_capacity((w * h) as usize);
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * w + x) as u16;
+                pixels.push([
+                    v.wrapping_mul(0x0123),
+                    v.wrapping_mul(0x4567),
+                    v.wrapping_mul(0x89AB),
+                    v.wrapping_mul(0xCDEF),
+                ]);
+            }
+        }
+        let fast = encode_farbfeld_from_rgba16(w, h, &pixels).unwrap();
+
+        // Per-pixel reference: 16-byte header + `to_be_bytes` per sample.
+        let mut reference = Vec::with_capacity(fast.len());
+        reference.extend_from_slice(MAGIC);
+        reference.extend_from_slice(&w.to_be_bytes());
+        reference.extend_from_slice(&h.to_be_bytes());
+        for px in &pixels {
+            for chan in px {
+                reference.extend_from_slice(&chan.to_be_bytes());
+            }
+        }
+        assert_eq!(fast, reference);
+    }
+
+    #[test]
+    fn encode_farbfeld_image_bulk_path_matches_per_sample_reference() {
+        // Same cross-check shape for `encode_farbfeld_image`, which
+        // routes through `encode_be_samples` directly on the flat
+        // `Vec<u16>` plane.
+        let w = 19u32;
+        let h = 11u32;
+        let sample_count = (w * h * 4) as usize;
+        let pixels: Vec<u16> = (0..sample_count).map(|i| (i * 0x1111) as u16).collect();
+        let img = FarbfeldImage {
+            width: w,
+            height: h,
+            pixels: pixels.clone(),
+        };
+        let fast = encode_farbfeld_image(&img).unwrap();
+
+        // Per-sample reference.
+        let mut reference = Vec::with_capacity(fast.len());
+        reference.extend_from_slice(MAGIC);
+        reference.extend_from_slice(&w.to_be_bytes());
+        reference.extend_from_slice(&h.to_be_bytes());
+        for &s in &pixels {
+            reference.extend_from_slice(&s.to_be_bytes());
+        }
+        assert_eq!(fast, reference);
     }
 }

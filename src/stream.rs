@@ -21,8 +21,11 @@
 
 use std::io::{self, Read, Write};
 
+use crate::encoder::encode_be_samples;
 use crate::error::{FarbfeldError, Result};
-use crate::parser::{parse_farbfeld_header, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
+use crate::parser::{
+    decode_be_samples, parse_farbfeld_header, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+};
 
 /// Row-at-a-time farbfeld reader.
 ///
@@ -196,10 +199,10 @@ impl<R: Read> FarbfeldStreamReader<R> {
         }
         // Zero-width images carry no body — still count the row.
         if self.read_row_bytes()? {
-            for (i, slot) in out.iter_mut().enumerate() {
-                let off = i * 2;
-                *slot = u16::from_be_bytes([self.row_buf[off], self.row_buf[off + 1]]);
-            }
+            // Vectorisable shared helper — `chunks_exact(2)` zipped with
+            // a `&mut [u16]` of matching length lets the auto-vectoriser
+            // turn the per-sample byte swap into a SIMD bswap.
+            decode_be_samples(&self.row_buf, out);
         }
         self.rows_read += 1;
         Ok(true)
@@ -274,19 +277,22 @@ impl<R: Read> FarbfeldStreamReader<R> {
         // `row_buf` read so no full-width scratch buffer is allocated
         // ahead of the body bytes. Honour any rows already consumed via
         // `read_row` by draining from `rows_read` to `height`.
+        //
+        // Per-row growth uses `extend(repeat_n(0, row_samples))` +
+        // `decode_be_samples` over the freshly-grown tail so the inner
+        // BE swap runs through the shared SIMD-friendly helper instead
+        // of a `push`-per-sample loop. `Vec::extend` from a `RepeatN`
+        // adapter compiles down to a single `extend_with` (memset) +
+        // length update, so the row's slots are zero-initialised in
+        // one bulk store before the BE swap fills them.
         let mut out: Vec<u16> = Vec::new();
         while self.rows_read < self.header.height {
             // `read_row_bytes` returns false only for the zero-width
             // (no body) case; the row is still counted toward `height`.
             if self.read_row_bytes()? {
-                out.reserve(row_samples);
-                for i in 0..row_samples {
-                    let off = i * 2;
-                    out.push(u16::from_be_bytes([
-                        self.row_buf[off],
-                        self.row_buf[off + 1],
-                    ]));
-                }
+                let prev_len = out.len();
+                out.resize(prev_len + row_samples, 0);
+                decode_be_samples(&self.row_buf, &mut out[prev_len..]);
             }
             self.rows_read += 1;
         }
@@ -384,12 +390,10 @@ impl<W: Write> FarbfeldStreamWriter<W> {
             )));
         }
         if !self.row_buf.is_empty() {
-            for (i, &sample) in row.iter().enumerate() {
-                let off = i * 2;
-                let be = sample.to_be_bytes();
-                self.row_buf[off] = be[0];
-                self.row_buf[off + 1] = be[1];
-            }
+            // Vectorisable shared helper — `chunks_exact_mut(2)` zipped
+            // with the input `row` lets the auto-vectoriser turn the
+            // per-sample BE store into a SIMD bswap.
+            encode_be_samples(row, &mut self.row_buf);
             write_all_to_invalid(&mut self.inner, &self.row_buf, "farbfeld stream: row body")?;
         }
         self.rows_written += 1;
