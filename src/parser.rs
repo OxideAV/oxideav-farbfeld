@@ -1,6 +1,8 @@
 //! farbfeld byte-stream parser.
 //!
-//! The format, in full (per the public `farbfeld(5)` man page):
+//! The format, in full (per the workspace's independent factual
+//! byte-layout description at
+//! [`docs/image/farbfeld/farbfeld-format.md`](https://github.com/OxideAV/docs/tree/master/image/farbfeld)):
 //!
 //! ```text
 //!   offset  bytes  field
@@ -55,6 +57,54 @@ pub struct FarbfeldHeader {
     /// `width * height * 8` — the number of body bytes that **must**
     /// follow the 16-byte header for the file to be well-formed.
     pub body_len: usize,
+}
+
+impl FarbfeldHeader {
+    /// Total on-disk size of the farbfeld file this header announces,
+    /// in bytes: `HEADER_LEN + body_len` = `16 + width * height * 8`.
+    ///
+    /// Returns [`FarbfeldError::InvalidData`] in the degenerate case
+    /// where `body_len` is so large that adding the 16-byte header
+    /// overflows `usize` (only reachable on 32-bit hosts with
+    /// `width * height` near `usize::MAX / 8`).
+    ///
+    /// Useful for pre-flight checks against a per-application file-size
+    /// cap before committing to a body read, and to assert the
+    /// header-promised file size against what an `io::Read` source
+    /// will deliver.
+    pub fn total_len(&self) -> Result<usize> {
+        HEADER_LEN.checked_add(self.body_len).ok_or_else(|| {
+            FarbfeldError::invalid("farbfeld: total file size overflows usize".to_string())
+        })
+    }
+}
+
+/// Peek the 16-byte farbfeld header off the front of `bytes` without
+/// touching the body.
+///
+/// Convenience wrapper around [`parse_farbfeld_header`] that takes the
+/// whole file (or a prefix of it) and reads only the first
+/// [`HEADER_LEN`] bytes; the rest is ignored, so callers can pass a
+/// short prefix `&buf[..16]`, a `bytes` of arbitrary length, or even a
+/// memory-mapped large file without committing to a full parse.
+///
+/// Returns [`FarbfeldError::InvalidData`] for any of:
+/// * fewer than 16 header bytes;
+/// * the magic prefix is not literal ASCII `"farbfeld"`;
+/// * `width * height * 8` overflows `usize`.
+///
+/// The returned [`FarbfeldHeader`]'s [`FarbfeldHeader::total_len`]
+/// reports the exact on-disk file size the header announces, which
+/// callers can use to refuse over-large images before allocating the
+/// body. This function never inspects bytes past offset 15, so the
+/// "DoS hardening" body-mismatch check that [`parse_farbfeld`] runs
+/// **is not** run here — it's the caller's contract to verify the
+/// body length before committing further.
+pub fn peek_farbfeld_dimensions(bytes: &[u8]) -> Result<FarbfeldHeader> {
+    // `parse_farbfeld_header` already only reads the first 16 bytes;
+    // this entry point exists to give callers a name that documents
+    // the intent (peek, don't parse) and to keep the call site short.
+    parse_farbfeld_header(bytes)
 }
 
 /// Parse the 16-byte farbfeld header.
@@ -113,9 +163,7 @@ pub fn parse_farbfeld_header(header: &[u8]) -> Result<FarbfeldHeader> {
 /// pixel-buffer capacity. See the module-level "DoS hardening" note.
 pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
     let header = parse_farbfeld_header(bytes)?;
-    let expected_total = HEADER_LEN.checked_add(header.body_len).ok_or_else(|| {
-        FarbfeldError::invalid("farbfeld: total file size overflows usize".to_string())
-    })?;
+    let expected_total = header.total_len()?;
     if bytes.len() != expected_total {
         return Err(FarbfeldError::invalid(format!(
             "farbfeld: body size mismatch — file has {} bytes, header announces {} ({}×{} pixels × {BYTES_PER_PIXEL} bytes + {HEADER_LEN} header)",
@@ -208,6 +256,112 @@ mod tests {
         assert_eq!(img.width, 0);
         assert_eq!(img.height, 0);
         assert!(img.pixels.is_empty());
+    }
+
+    #[test]
+    fn header_total_len_matches_header_plus_body() {
+        // 3×4 image = 12 pixels × 8 bytes = 96 body bytes; +16 header
+        // = 112 total.
+        let h = FarbfeldHeader {
+            width: 3,
+            height: 4,
+            body_len: 96,
+        };
+        assert_eq!(h.total_len().unwrap(), HEADER_LEN + 96);
+        assert_eq!(h.total_len().unwrap(), 112);
+    }
+
+    #[test]
+    fn header_total_len_handles_zero_dimension() {
+        // Empty body — total is just the header.
+        let h = FarbfeldHeader {
+            width: 0,
+            height: 0,
+            body_len: 0,
+        };
+        assert_eq!(h.total_len().unwrap(), HEADER_LEN);
+    }
+
+    #[test]
+    fn header_total_len_reports_overflow_without_panicking() {
+        // Synthetic header whose body_len is at the very top of usize;
+        // adding HEADER_LEN must fail with InvalidData, not panic.
+        let h = FarbfeldHeader {
+            width: 0xFFFF_FFFF,
+            height: 0xFFFF_FFFF,
+            body_len: usize::MAX,
+        };
+        let err = h.total_len().unwrap_err();
+        let FarbfeldError::InvalidData(s) = err;
+        assert!(s.contains("overflow"), "msg = {s:?}");
+    }
+
+    #[test]
+    fn peek_farbfeld_dimensions_returns_same_as_parse_header() {
+        // Build a 5×7 file but feed only its 16-byte header to the peek
+        // — the result must match calling the underlying header parser.
+        let mut buf = Vec::from(&b"farbfeld"[..]);
+        buf.extend_from_slice(&5u32.to_be_bytes());
+        buf.extend_from_slice(&7u32.to_be_bytes());
+        // Append a fake (but byte-correctly-sized) body so we can prove
+        // the peek does not depend on the body content.
+        buf.extend_from_slice(&vec![0u8; 5 * 7 * BYTES_PER_PIXEL]);
+
+        let h_full = peek_farbfeld_dimensions(&buf).unwrap();
+        let h_prefix = peek_farbfeld_dimensions(&buf[..HEADER_LEN]).unwrap();
+        assert_eq!(h_full, h_prefix);
+        assert_eq!(h_full.width, 5);
+        assert_eq!(h_full.height, 7);
+        assert_eq!(h_full.body_len, 5 * 7 * BYTES_PER_PIXEL);
+        assert_eq!(h_full.total_len().unwrap(), buf.len());
+    }
+
+    #[test]
+    fn peek_farbfeld_dimensions_rejects_short_buffer() {
+        // 15-byte buffer can't carry a 16-byte header.
+        assert!(peek_farbfeld_dimensions(&[0u8; HEADER_LEN - 1]).is_err());
+        // Empty buffer.
+        assert!(peek_farbfeld_dimensions(&[]).is_err());
+    }
+
+    #[test]
+    fn peek_farbfeld_dimensions_rejects_wrong_magic() {
+        let mut buf = [0u8; HEADER_LEN];
+        buf[..8].copy_from_slice(b"farbFELD");
+        assert!(peek_farbfeld_dimensions(&buf).is_err());
+    }
+
+    #[test]
+    fn peek_farbfeld_dimensions_accepts_body_announcing_header_only() {
+        // 0×0 — well-formed header, no body needed; peek must accept
+        // any input that starts with this 16-byte preamble.
+        let mut buf = Vec::from(&b"farbfeld"[..]);
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        buf.extend_from_slice(&0u32.to_be_bytes());
+        let h = peek_farbfeld_dimensions(&buf).unwrap();
+        assert_eq!(h.width, 0);
+        assert_eq!(h.height, 0);
+        assert_eq!(h.body_len, 0);
+        assert_eq!(h.total_len().unwrap(), HEADER_LEN);
+    }
+
+    #[test]
+    fn peek_farbfeld_dimensions_does_not_validate_body_length() {
+        // Announce 4×4 (= 128 body bytes) but provide only the 16-byte
+        // header. `peek_farbfeld_dimensions` is by contract the
+        // "look-but-don't-allocate" path: it must not reject this just
+        // because the body is absent — that's `parse_farbfeld`'s job.
+        let mut buf = Vec::from(&b"farbfeld"[..]);
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        buf.extend_from_slice(&4u32.to_be_bytes());
+        let h = peek_farbfeld_dimensions(&buf).unwrap();
+        assert_eq!(h.width, 4);
+        assert_eq!(h.height, 4);
+        assert_eq!(h.body_len, 4 * 4 * BYTES_PER_PIXEL);
+        // The whole-file parser, by contrast, must reject the same
+        // input — the cross-check between announced size and bytes
+        // present is the parser's contract.
+        assert!(parse_farbfeld(&buf).is_err());
     }
 
     #[test]

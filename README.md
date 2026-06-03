@@ -37,6 +37,18 @@ zero-width case looped `height` (up to 2³²) empty iterations. Each is now
 bounded by the bytes actually delivered; regression tests live in
 `tests/dos_hardening.rs`.
 
+Round 7 added a dimension-only peek convenience
+([`peek_farbfeld_dimensions`]) and a [`FarbfeldHeader::total_len`]
+method (= `16 + width * height * 8`) so sandboxes and pre-flight size
+checks can read the 16-byte header off a file (or its prefix) and
+refuse over-large images before allocating the body. The two surfaces
+are dogfooded by the whole-file decoder's existing announced-body
+cross-check. The round also realigned three internal module-doc
+citations from the upstream `farbfeld(5)` man page (project-shipped
+documentation, treated as link-only per this workspace's clean-room
+policy) to the workspace's own independent factual byte-layout
+description at `docs/image/farbfeld/farbfeld-format.md`.
+
 Round 6 added the symmetric encode-side fuzz target
 (`fuzz/fuzz_targets/encode.rs`). The fuzz bytes are interpreted as
 `(width, height, body)` triples bounded to 64×64 (16 KiB body cap per
@@ -106,7 +118,7 @@ Standalone (no `oxideav-core` dependency, build with
 ```rust
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, parse_farbfeld,
-    FarbfeldImage, FarbfeldError,
+    peek_farbfeld_dimensions, FarbfeldImage, FarbfeldError,
 };
 
 // Encode from native-endian [R, G, B, A] u16 pixels.
@@ -116,6 +128,13 @@ let bytes = encode_farbfeld_from_rgba16(1, 1, &pixels)?;
 // Or pass a pre-serialised big-endian RGBA u16 body verbatim.
 let body_be = [0xFF, 0xFF, 0x00, 0x00, 0x00, 0x00, 0xFF, 0xFF];
 let bytes = encode_farbfeld(1, 1, &body_be)?;
+
+// Cheap pre-flight: read the 16-byte header off the file and
+// reject over-large images before allocating the body.
+let header = peek_farbfeld_dimensions(&bytes[..16])?;
+assert_eq!(header.width, 1);
+assert_eq!(header.height, 1);
+assert_eq!(header.total_len()?, bytes.len()); // 16 + 1*1*8
 
 // Parse a complete farbfeld byte stream.
 let img: FarbfeldImage = parse_farbfeld(&bytes)?;

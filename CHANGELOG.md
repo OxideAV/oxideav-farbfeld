@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `peek_farbfeld_dimensions(bytes)`: top-level convenience that decodes
+  the 16-byte farbfeld header off the front of `bytes` without
+  touching the body. Useful for sandboxes that want to refuse
+  over-large images before allocating the pixel buffer. Operates on
+  whatever prefix the caller supplies (a 16-byte slice, a memory-
+  mapped file, an in-flight buffer), so the pre-flight check costs
+  exactly the header parse.
+- `FarbfeldHeader::total_len()`: announced on-disk file size
+  (`HEADER_LEN + body_len` = `16 + width * height * 8`) with a
+  checked-add so the degenerate 32-bit overflow case surfaces as
+  `FarbfeldError::InvalidData` instead of a panic. The whole-file
+  `parse_farbfeld` now dogfoods this method for its own body-length
+  cross-check.
 - Encode-side `cargo-fuzz` target (`fuzz/fuzz_targets/encode.rs`).
   Interprets the fuzz bytes as a `(width, height, body)` triple
   bounded to 64×64 (16 KiB body cap per execution) and drives all
@@ -53,6 +66,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   factual byte-layout description at
   `docs/image/farbfeld/farbfeld-format.md` instead of external
   reference points.
+- Same realignment now extended to `src/parser.rs` and
+  `src/encoder.rs` module docs — both previously cited the upstream
+  `farbfeld(5)` man page; that project-shipped documentation is
+  treated as link-only by this workspace's clean-room policy and
+  isn't the source the implementation was built against. The
+  `src/lib.rs` summary now also names `docs/image/farbfeld/farbfeld-format.md`
+  explicitly (rather than "a single man page"), keeping the source
+  citation consistent across the whole crate.
 
 ## [0.0.3](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.2...v0.0.3) - 2026-05-24
 

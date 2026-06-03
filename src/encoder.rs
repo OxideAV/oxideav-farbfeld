@@ -1,7 +1,11 @@
 //! farbfeld byte-stream encoder.
 //!
 //! Mirror of [`crate::parser::parse_farbfeld`]: takes pixel data and
-//! emits the on-disk byte stream described in `farbfeld(5)`.
+//! emits the on-disk byte stream described in the workspace's own
+//! independent byte-layout description at
+//! `docs/image/farbfeld/farbfeld-format.md` — 8-byte ASCII magic,
+//! two big-endian `u32` dimensions, then `width * height` pixels of
+//! four big-endian `u16` samples in `R, G, B, A` order.
 //!
 //! Two entry points cover the two natural caller shapes:
 //! * [`encode_farbfeld`] — accepts a pre-serialised big-endian RGBA u16

@@ -1,7 +1,10 @@
 //! Pure-Rust farbfeld reader/writer.
 //!
-//! farbfeld is a minimalist lossless image format. The entire spec
-//! fits in a single man page; in summary:
+//! farbfeld is a minimalist lossless image format. The bytes-on-disk
+//! description used by this crate lives in the workspace at
+//! `docs/image/farbfeld/farbfeld-format.md` (independently authored
+//! factual prose, not a mirror or paraphrase of the upstream man page);
+//! in summary:
 //!
 //! ```text
 //!   bytes  field
@@ -30,10 +33,21 @@
 //! ## Example
 //!
 //! ```
-//! use oxideav_farbfeld::{encode_farbfeld_from_rgba16, parse_farbfeld};
+//! use oxideav_farbfeld::{
+//!     encode_farbfeld_from_rgba16, parse_farbfeld, peek_farbfeld_dimensions,
+//! };
 //!
 //! let pixels = [[0xFFFF, 0x0000, 0x0000, 0xFFFF]];
 //! let bytes = encode_farbfeld_from_rgba16(1, 1, &pixels).unwrap();
+//!
+//! // Cheap pre-flight: read the 16-byte header without touching the
+//! // body. `total_len()` reports the announced full file size, so a
+//! // sandbox can refuse over-large images before allocating.
+//! let header = peek_farbfeld_dimensions(&bytes[..16]).unwrap();
+//! assert_eq!(header.width, 1);
+//! assert_eq!(header.height, 1);
+//! assert_eq!(header.total_len().unwrap(), bytes.len());
+//!
 //! let img = parse_farbfeld(&bytes).unwrap();
 //! assert_eq!(img.width, 1);
 //! assert_eq!(img.height, 1);
@@ -61,7 +75,8 @@ pub use encoder::{encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_
 pub use error::{FarbfeldError, Result};
 pub use image::FarbfeldImage;
 pub use parser::{
-    parse_farbfeld, parse_farbfeld_header, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    parse_farbfeld, parse_farbfeld_header, peek_farbfeld_dimensions, FarbfeldHeader,
+    BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
 };
 pub use stream::{FarbfeldStreamReader, FarbfeldStreamWriter};
 
