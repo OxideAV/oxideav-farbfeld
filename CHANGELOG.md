@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `fuzz/fuzz_targets/stream_io.rs`: a third `cargo-fuzz` target that
+  drives `FarbfeldStreamReader` / `FarbfeldStreamWriter` through a
+  chunked I/O transport (`ChoppyReader` / `ChoppyWriter`) whose `read`
+  / `write` calls return short, mid-sized, or full-buffer chunks drawn
+  from a deterministic xorshift32 schedule seeded by the fuzz input.
+  The existing `decode` / `encode` targets drive their input through a
+  bulk `Cursor` / byte slice and never exercise the streaming reader's
+  bounded `Read::take` + `read_to_end` discipline or the streaming
+  writer's `Write::write_all` discipline under choppy I/O. The new
+  target asserts five invariants on every input: no panics under any
+  chunk pattern; chunked-stream decode equals bulk
+  `parse_farbfeld` decode; chunked-stream encode equals bulk
+  `encode_farbfeld_image` encode; the streaming roundtrip closes
+  (encode-then-decode reproduces the input samples); and a
+  `skip_row`-only walk covers `height` rows without error. A
+  body-truncation rejection path is also probed on every non-empty
+  body. Image dimensions are capped at 32×32 (4 KiB body) so the
+  fuzzer can iterate hundreds of `read` / `write` calls per execution
+  inside libFuzzer's per-input budget. Initial coverage burn:
+  2 548 637 executions / 61 s clean, cov 382 ft 1396 corp 117 — no
+  panics.
+
 ### Changed
 
 - Hot-path codec loops auto-vectorised. The per-sample big-endian byte

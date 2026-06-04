@@ -93,6 +93,25 @@ truncated body always rejected) run additional PRNG-driven sweeps.
 The sweep is offline / no-extra-dep (xorshift32 inlined) so any
 failure is reproducible from the seed printed in the assertion.
 
+Round 10 added a third `cargo-fuzz` target
+(`fuzz/fuzz_targets/stream_io.rs`) that exercises `FarbfeldStreamReader`
+and `FarbfeldStreamWriter` through a chunked I/O transport
+(`ChoppyReader` / `ChoppyWriter`) whose `read` / `write` calls return
+short, mid-sized, or full-buffer chunks drawn from a deterministic
+xorshift32 schedule seeded by the fuzz input. The existing decode /
+encode targets drive their input through a bulk `Cursor` / byte slice,
+so neither exercises the streaming reader's bounded `Read::take` +
+`read_to_end` discipline or the streaming writer's `Write::write_all`
+discipline under choppy I/O — a genuinely different surface that fails
+silently if `write_all` stops looping on a short success or `Read::take`
+stops respecting its length cap. The target asserts five invariants on
+every input: no panics; chunked decode equals bulk `parse_farbfeld`
+decode; chunked encode equals bulk `encode_farbfeld_image` encode; the
+streaming roundtrip closes; and a `skip_row`-only walk covers `height`
+rows. A body-truncation rejection path is also probed on every non-
+empty body. 2 548 637 executions / 61 s clean against the new corpus
+(cov 382 ft 1396 corp 117), no panics, no truncation regressions.
+
 Round 9 hoisted the per-sample big-endian byte swap on the five
 non-memcpy hot paths into two shared internal helpers
 (`decode_be_samples` / `encode_be_samples`) that walk the input as
@@ -138,6 +157,7 @@ group).
 | DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes |
 | Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
 | Fuzzing (encode)                | `cargo-fuzz` target (3 whole-file paths + streaming writer agree, 6 invariants + 2 rejection probes), 601 312 runs / 61 s clean |
+| Fuzzing (streaming I/O)         | `cargo-fuzz` target — `FarbfeldStreamReader` / `FarbfeldStreamWriter` over a choppy `Read` / `Write` transport (1..=8-byte chunks), 5 invariants + truncation probe, 2 548 637 runs / 61 s clean |
 | Property sweep (PRNG)           | 8 invariants × 6 shape distributions × 96 iters + 4 malformed-input scenarios |
 
 ## API

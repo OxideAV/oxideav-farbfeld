@@ -22,6 +22,16 @@ cargo-fuzz = true
 # `(width, height, body)` triples and asserts they all agree byte-for-
 # byte and roundtrip cleanly through the parser.
 #
+# Round 235 added a third target, `stream_io`, which drives the
+# `FarbfeldStreamReader` / `FarbfeldStreamWriter` against a chunked I/O
+# transport whose `read` / `write` calls return short / mid-sized /
+# full-buffer chunks drawn from a fuzz-controlled xorshift32 schedule.
+# That exercises the streaming reader's bounded `Read::take` /
+# `read_to_end` discipline and the streaming writer's `Write::write_all`
+# discipline under attacker-chosen choppy I/O — a meaningfully different
+# surface from the `decode` / `encode` targets which both drive their
+# input through a bulk `Cursor` / byte slice.
+#
 # The harness builds against the standalone (no `oxideav-core`) API:
 # `default-features = false` drops the framework dependency so the fuzz
 # targets compile and link the parser/encoder directly.
@@ -53,5 +63,11 @@ doc = false
 [[bin]]
 name = "encode"
 path = "fuzz_targets/encode.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "stream_io"
+path = "fuzz_targets/stream_io.rs"
 test = false
 doc = false
