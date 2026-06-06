@@ -9,6 +9,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FarbfeldStreamReader::read_row_raw` and
+  `FarbfeldStreamWriter::write_row_raw`: a symmetric pair of raw-bytes
+  pass-through methods on the streaming API. `read_row_raw` yields the
+  next row's on-disk `width * 8` big-endian body bytes verbatim into a
+  caller-provided `&mut [u8]`, skipping the per-sample BE → native
+  conversion `read_row` performs; `write_row_raw` accepts an already-BE-
+  encoded `width * 8`-byte row and forwards it to the underlying writer
+  unchanged. Both methods share the same row-bytes pump, bounded
+  `Read::take` / `Write::write_all` discipline, and row-count accounting
+  as their native-endian counterparts, so a stream may mix the raw and
+  native paths row-by-row in either direction (verified by mid-stream
+  mixing tests). The use case is forwarders / proxies / hash-and-
+  discard pipelines that need the body bytes but never the native-endian
+  sample shape — e.g. reading a farbfeld stream from one source and
+  forwarding the body to another consumer without paying the native-
+  endian round trip. Ten unit tests cover the new surfaces: read-side
+  byte equality against the synthesised reference, mid-stream mixing
+  with `read_row` and `skip_row`, zero-width and truncated-body edges,
+  write-side byte equality against the reference, extra-row / wrong-
+  length / zero-width / mixed-mode rejection, and an end-to-end
+  `read_row_raw` → `write_row_raw` byte-identical passthrough on a
+  7×5 image.
+
 - `fuzz/fuzz_targets/stream_io.rs`: a third `cargo-fuzz` target that
   drives `FarbfeldStreamReader` / `FarbfeldStreamWriter` through a
   chunked I/O transport (`ChoppyReader` / `ChoppyWriter`) whose `read`

@@ -93,6 +93,28 @@ truncated body always rejected) run additional PRNG-driven sweeps.
 The sweep is offline / no-extra-dep (xorshift32 inlined) so any
 failure is reproducible from the seed printed in the assertion.
 
+Round 11 added a raw-bytes pass-through pair on the streaming API —
+[`FarbfeldStreamReader::read_row_raw`] yields the next row's on-disk
+`width * 8` big-endian bytes verbatim into a caller `&mut [u8]` slot,
+and [`FarbfeldStreamWriter::write_row_raw`] accepts an already-BE-encoded
+`width * 8`-byte row and forwards it to the underlying writer
+unchanged. Both methods share the same row-bytes pump, bounded
+`Read::take` / `Write::write_all` discipline, and row-count accounting
+as their native-endian counterparts ([`FarbfeldStreamReader::read_row`]
+/ [`FarbfeldStreamWriter::write_row`]), so a stream may mix the raw and
+native paths row-by-row in either direction. The reader's raw path is
+the symmetric counterpart to [`FarbfeldStreamReader::skip_row`] for
+callers that want the bytes *and* want them as bytes; the writer's raw
+path closes the loop for pipelines reading from one farbfeld source and
+forwarding the body to another consumer (proxies, hash-and-discard,
+re-muxing to another 16-bit-BE container) without paying the
+native-endian round-trip. Ten unit tests cover the new surfaces:
+read-side byte equality against the synthesised reference, mid-stream
+mixing with `read_row` and `skip_row`, zero-width and truncated-body
+edges, write-side byte equality against the reference, extra-row /
+wrong-length / zero-width / mixed-mode rejection, and an end-to-end
+`read_row_raw` → `write_row_raw` byte-identical passthrough.
+
 Round 10 added a third `cargo-fuzz` target
 (`fuzz/fuzz_targets/stream_io.rs`) that exercises `FarbfeldStreamReader`
 and `FarbfeldStreamWriter` through a chunked I/O transport
@@ -147,9 +169,9 @@ group).
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
 | Parse (whole-file)              | full                              |
-| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader` (incl. `skip_row` / `skip_rows`) |
+| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader` (incl. `read_row_raw` / `skip_row` / `skip_rows`) |
 | Encode (whole-file)             | full                              |
-| Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter`    |
+| Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter` (incl. `write_row_raw`) |
 | Round-trip (self)               | exact                             |
 | Round-trip (vs `magick`)        | exact (bit-identical, when present)|
 | Container demux                 | full                              |

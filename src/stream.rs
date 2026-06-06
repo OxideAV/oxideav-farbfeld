@@ -161,6 +161,56 @@ impl<R: Read> FarbfeldStreamReader<R> {
         Ok(done)
     }
 
+    /// Read the next row's on-disk bytes directly into `out`, without
+    /// the per-sample big-endian → native-endian conversion that
+    /// [`read_row`](Self::read_row) performs.
+    ///
+    /// `out` must be exactly `width * 8` bytes long: each pixel
+    /// contributes eight bytes (four 16-bit big-endian channels). The
+    /// row is delivered verbatim — the on-disk byte order is preserved.
+    ///
+    /// This is the symmetric counterpart to [`write_row_raw`] on the
+    /// writer side, and the pass-through-friendly counterpart to
+    /// [`read_row`](Self::read_row). It exists for callers that don't
+    /// need the native-endian sample shape and would otherwise have to
+    /// re-encode it back to big-endian — proxies forwarding a farbfeld
+    /// stream onto another consumer, hash-and-discard pipelines that
+    /// only need the bytes, and consumers writing the body verbatim
+    /// into another 16-bit-big-endian sample container.
+    ///
+    /// Returns:
+    /// * `Ok(true)` if a row was read.
+    /// * `Ok(false)` if all `height` rows have already been returned.
+    /// * [`FarbfeldError::InvalidData`] if `out` is the wrong length,
+    ///   or if the underlying reader yields fewer than `width * 8`
+    ///   bytes (truncated file).
+    ///
+    /// The same DoS-hardening discipline as [`read_row`](Self::read_row)
+    /// applies: the row body is read with a length-bounded [`Read::take`],
+    /// so a header announcing a multi-gigabyte row width but shipping no
+    /// body surfaces as a truncation error without forcing the
+    /// announced-width allocation.
+    pub fn read_row_raw(&mut self, out: &mut [u8]) -> Result<bool> {
+        if self.rows_read >= self.header.height {
+            return Ok(false);
+        }
+        if out.len() != self.row_bytes {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: row out-slice has {} bytes, need {} ({} × {BYTES_PER_PIXEL})",
+                out.len(),
+                self.row_bytes,
+                self.header.width,
+            )));
+        }
+        if self.read_row_bytes()? {
+            // `read_row_bytes` returns `true` only when `row_bytes > 0`
+            // and exactly that many bytes were read into `self.row_buf`.
+            out.copy_from_slice(&self.row_buf);
+        }
+        self.rows_read += 1;
+        Ok(true)
+    }
+
     /// Read the next row of the body into `out`.
     ///
     /// `out` must be exactly `width * 4` `u16` slots long: each pixel
@@ -395,6 +445,50 @@ impl<W: Write> FarbfeldStreamWriter<W> {
             // per-sample BE store into a SIMD bswap.
             encode_be_samples(row, &mut self.row_buf);
             write_all_to_invalid(&mut self.inner, &self.row_buf, "farbfeld stream: row body")?;
+        }
+        self.rows_written += 1;
+        Ok(())
+    }
+
+    /// Append one row of pre-serialised big-endian RGBA u16 bytes to
+    /// the body, without the per-sample native-endian → big-endian
+    /// conversion that [`write_row`](Self::write_row) performs.
+    ///
+    /// `row` must be exactly `width * 8` bytes — four big-endian 16-bit
+    /// channels per pixel, already laid out in on-disk order. The bytes
+    /// are forwarded verbatim to the underlying writer.
+    ///
+    /// This is the symmetric counterpart to
+    /// [`FarbfeldStreamReader::read_row_raw`]: a proxy or pipeline that
+    /// reads bytes from one farbfeld stream and forwards them onto
+    /// another (or to a hash/store/container that consumes the same
+    /// 16-bit BE layout) can chain the two together and skip the
+    /// round-trip through native-endian `u16` samples entirely.
+    ///
+    /// Returns [`FarbfeldError::InvalidData`] if the row count would
+    /// exceed `height`, or if `row.len()` is wrong, or if the
+    /// underlying writer fails.
+    pub fn write_row_raw(&mut self, row: &[u8]) -> Result<()> {
+        if self.rows_written >= self.height {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: write_row_raw called after all {} rows already written",
+                self.height,
+            )));
+        }
+        let want = self.row_buf.len();
+        if row.len() != want {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: row in-slice has {} bytes, need {want} ({} × {BYTES_PER_PIXEL})",
+                row.len(),
+                self.width,
+            )));
+        }
+        if !row.is_empty() {
+            // Bytes are already in on-disk big-endian layout; forward
+            // verbatim. `write_all_to_invalid` runs the same
+            // `Write::write_all` loop as `write_row` so short writes
+            // compose correctly under a non-bulk transport.
+            write_all_to_invalid(&mut self.inner, row, "farbfeld stream: row body")?;
         }
         self.rows_written += 1;
         Ok(())
@@ -708,6 +802,263 @@ mod tests {
 
         let row_samples = (w * 4) as usize;
         assert_eq!(tail, full[row_samples * 2..]);
+    }
+
+    #[test]
+    fn read_row_raw_yields_on_disk_bytes_verbatim() {
+        // 3×2 image — assemble a known sample plane, encode it, then
+        // walk the body row-by-row via `read_row_raw` and check the
+        // emitted bytes equal the raw body bytes of the synthesised
+        // reference. No native-endian conversion happens on this path,
+        // so the bytes must come out exactly as they went in.
+        let mut samples = Vec::new();
+        for y in 0..2u32 {
+            for x in 0..3u32 {
+                let v = (y * 100 + x * 10) as u16;
+                samples.push(v);
+                samples.push(v.wrapping_add(1));
+                samples.push(v.wrapping_add(2));
+                samples.push(v.wrapping_add(3));
+            }
+        }
+        let bytes = synth(3, 2, &samples);
+        let row_bytes_len = 3 * BYTES_PER_PIXEL;
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
+
+        let mut row_raw = vec![0u8; row_bytes_len];
+        assert!(reader.read_row_raw(&mut row_raw).unwrap());
+        assert_eq!(
+            row_raw,
+            bytes[HEADER_LEN..HEADER_LEN + row_bytes_len],
+            "row 0 raw bytes must equal the on-disk body prefix"
+        );
+        assert_eq!(reader.rows_read(), 1);
+
+        assert!(reader.read_row_raw(&mut row_raw).unwrap());
+        assert_eq!(
+            row_raw,
+            bytes[HEADER_LEN + row_bytes_len..HEADER_LEN + 2 * row_bytes_len],
+            "row 1 raw bytes must equal the on-disk body's second row"
+        );
+        assert_eq!(reader.rows_read(), 2);
+
+        // Past end — Ok(false).
+        assert!(!reader.read_row_raw(&mut row_raw).unwrap());
+    }
+
+    #[test]
+    fn read_row_raw_rejects_wrong_out_length() {
+        let bytes = synth(2, 1, &[0u16; 8]);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        // width=2 needs 16-byte slot; pass 8.
+        let mut row = vec![0u8; 8];
+        assert!(reader.read_row_raw(&mut row).is_err());
+    }
+
+    #[test]
+    fn read_row_raw_handles_zero_width_no_body() {
+        // 0×3 — three zero-byte rows; read_row_raw still counts them.
+        let bytes = synth(0, 3, &[]);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        let mut row: Vec<u8> = Vec::new();
+        for i in 0..3u32 {
+            assert!(reader.read_row_raw(&mut row).unwrap());
+            assert_eq!(reader.rows_read(), i + 1);
+        }
+        assert!(!reader.read_row_raw(&mut row).unwrap());
+    }
+
+    #[test]
+    fn read_row_raw_propagates_truncated_body() {
+        // 2×2 (= 32 body bytes) but only 16 bytes of body present
+        // — one full row + nothing for the second.
+        let mut bytes = Vec::new();
+        bytes.extend_from_slice(MAGIC);
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&2u32.to_be_bytes());
+        bytes.extend_from_slice(&[0u8; 16]); // one full row only
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
+        let mut row = vec![0u8; 16];
+        // First row needs 16 bytes; ok.
+        assert!(reader.read_row_raw(&mut row).is_ok());
+        // Second row needs 16; none left — truncation.
+        let err = reader.read_row_raw(&mut row).unwrap_err();
+        let FarbfeldError::InvalidData(s) = err;
+        assert!(s.contains("truncated"), "msg = {s:?}");
+    }
+
+    #[test]
+    fn read_row_raw_and_read_row_are_interchangeable_mid_stream() {
+        // Mixing `read_row_raw` and `read_row` across the same reader
+        // must produce contiguous rows — the raw path and the converted
+        // path share the same row-bytes pump.
+        let mut samples = Vec::new();
+        for y in 0..4u32 {
+            for x in 0..3u32 {
+                let v = (y * 3 + x) as u16;
+                samples.push(v.wrapping_mul(0x0123));
+                samples.push(v.wrapping_mul(0x4567));
+                samples.push(v.wrapping_mul(0x89AB));
+                samples.push(v.wrapping_mul(0xCDEF));
+            }
+        }
+        let bytes = synth(3, 4, &samples);
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
+
+        // Row 0 via raw — verify bytes.
+        let row_bytes_len = 3 * BYTES_PER_PIXEL;
+        let mut raw = vec![0u8; row_bytes_len];
+        assert!(reader.read_row_raw(&mut raw).unwrap());
+        assert_eq!(raw, bytes[HEADER_LEN..HEADER_LEN + row_bytes_len]);
+
+        // Row 1 via native — verify the matching sample slice.
+        let mut row_native = vec![0u16; 12];
+        assert!(reader.read_row(&mut row_native).unwrap());
+        assert_eq!(row_native, &samples[12..24]);
+
+        // Row 2 via skip.
+        assert!(reader.skip_row().unwrap());
+
+        // Row 3 via raw again — confirm we're aligned on row 3's bytes.
+        assert!(reader.read_row_raw(&mut raw).unwrap());
+        let row3_off = HEADER_LEN + 3 * row_bytes_len;
+        assert_eq!(raw, bytes[row3_off..row3_off + row_bytes_len]);
+
+        assert_eq!(reader.rows_read(), 4);
+        assert!(!reader.read_row_raw(&mut raw).unwrap());
+    }
+
+    #[test]
+    fn write_row_raw_accepts_be_bytes_verbatim_byte_exact_against_reference() {
+        // Construct a sample plane, build the synthesised reference
+        // (header + per-sample BE), then drive `write_row_raw` with
+        // each row's BE-encoded body bytes and check the writer's
+        // emitted byte stream equals the reference exactly.
+        let mut samples = Vec::new();
+        for y in 0..3u32 {
+            for x in 0..2u32 {
+                let base = (y * 2 + x) as u16;
+                samples.push(base.wrapping_mul(0x0123));
+                samples.push(base.wrapping_mul(0x4567));
+                samples.push(base.wrapping_mul(0x89AB));
+                samples.push(base.wrapping_mul(0xCDEF));
+            }
+        }
+        let reference = synth(2, 3, &samples);
+        let row_bytes_len = 2 * BYTES_PER_PIXEL;
+        // The body bytes of the reference are the per-sample BE bytes;
+        // slice them per row to feed `write_row_raw`.
+        let body = &reference[HEADER_LEN..];
+
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 2, 3).unwrap();
+        for row_idx in 0..3usize {
+            let off = row_idx * row_bytes_len;
+            writer
+                .write_row_raw(&body[off..off + row_bytes_len])
+                .unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        assert_eq!(bytes, reference);
+    }
+
+    #[test]
+    fn write_row_raw_rejects_wrong_row_length() {
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 3, 1).unwrap();
+        // width=3 needs 24 bytes; pass 16.
+        let too_short = [0u8; 16];
+        assert!(writer.write_row_raw(&too_short).is_err());
+    }
+
+    #[test]
+    fn write_row_raw_rejects_extra_row() {
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 1, 2).unwrap();
+        let row = [0u8; BYTES_PER_PIXEL];
+        writer.write_row_raw(&row).unwrap();
+        writer.write_row_raw(&row).unwrap();
+        // Third call past height = error.
+        assert!(writer.write_row_raw(&row).is_err());
+    }
+
+    #[test]
+    fn write_row_raw_handles_zero_width() {
+        // 0×3 — three rows, each empty body slice.
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 0, 3).unwrap();
+        for _ in 0..3 {
+            writer.write_row_raw(&[]).unwrap();
+        }
+        let bytes = writer.finish().unwrap();
+        // 16-byte header only.
+        assert_eq!(bytes.len(), HEADER_LEN);
+        assert_eq!(&bytes[..8], MAGIC);
+        assert_eq!(&bytes[8..12], &[0, 0, 0, 0]);
+        assert_eq!(&bytes[12..16], &[0, 0, 0, 3]);
+    }
+
+    #[test]
+    fn write_row_raw_and_write_row_can_be_mixed_mid_stream() {
+        // Mixing the two write paths must produce a stream that round-
+        // trips through `parse_farbfeld` and matches the per-row native-
+        // endian samples — the raw path emits the bytes verbatim, the
+        // native path encodes them, and the combined output is
+        // continuous.
+        let mut samples = Vec::new();
+        for y in 0..4u32 {
+            for x in 0..2u32 {
+                let v = (y * 2 + x) as u16;
+                samples.push(v.wrapping_mul(0x1111));
+                samples.push(v.wrapping_mul(0x2222));
+                samples.push(v.wrapping_mul(0x3333));
+                samples.push(v.wrapping_mul(0x4444));
+            }
+        }
+        let reference = synth(2, 4, &samples);
+        let row_bytes_len = 2 * BYTES_PER_PIXEL;
+        let body = &reference[HEADER_LEN..];
+
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 2, 4).unwrap();
+        // Row 0 — raw bytes.
+        writer.write_row_raw(&body[..row_bytes_len]).unwrap();
+        // Row 1 — native samples.
+        writer.write_row(&samples[8..16]).unwrap();
+        // Row 2 — raw bytes.
+        writer
+            .write_row_raw(&body[2 * row_bytes_len..3 * row_bytes_len])
+            .unwrap();
+        // Row 3 — native samples.
+        writer.write_row(&samples[24..32]).unwrap();
+
+        let bytes = writer.finish().unwrap();
+        assert_eq!(bytes, reference);
+    }
+
+    #[test]
+    fn raw_passthrough_round_trips_reader_into_writer_without_conversion() {
+        // The combined value of `read_row_raw` + `write_row_raw` is
+        // shovelling bytes from one farbfeld stream to another without
+        // ever touching the native-endian sample shape. Build a
+        // reference stream, drain it row-by-row via `read_row_raw`,
+        // forward each row via `write_row_raw`, and confirm the output
+        // equals the input byte-for-byte.
+        let mut samples = Vec::new();
+        for y in 0..5u32 {
+            for x in 0..7u32 {
+                let v = (y * 7 + x) as u16;
+                samples.push(v.wrapping_mul(0x1357));
+                samples.push(v.wrapping_mul(0x2468));
+                samples.push(v.wrapping_mul(0xACE0));
+                samples.push(v.wrapping_mul(0xBDF1));
+            }
+        }
+        let reference = synth(7, 5, &samples);
+
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(reference.clone())).unwrap();
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), 7, 5).unwrap();
+        let mut row_raw = vec![0u8; 7 * BYTES_PER_PIXEL];
+        while reader.read_row_raw(&mut row_raw).unwrap() {
+            writer.write_row_raw(&row_raw).unwrap();
+        }
+        let forwarded = writer.finish().unwrap();
+        assert_eq!(forwarded, reference);
     }
 
     #[test]
