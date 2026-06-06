@@ -8,16 +8,29 @@
 //!
 //! Bench groups:
 //!
-//! 1. `parse_whole`            — `parse_farbfeld` on a pre-encoded buffer.
-//! 2. `encode_raw_be`          — `encode_farbfeld` (pre-serialised BE body).
-//! 3. `encode_from_rgba16`     — `encode_farbfeld_from_rgba16`
+//! 1. `parse_whole`             — `parse_farbfeld` on a pre-encoded buffer.
+//! 2. `encode_raw_be`           — `encode_farbfeld` (pre-serialised BE body).
+//! 3. `encode_from_rgba16`      — `encode_farbfeld_from_rgba16`
 //!    (native-endian RGBA, per-channel BE swap on emit).
-//! 4. `encode_image`           — `encode_farbfeld_image` (flat `[u16]`
+//! 4. `encode_image`            — `encode_farbfeld_image` (flat `[u16]`
 //!    plane via `FarbfeldImage`).
-//! 5. `stream_read_all_rows`   — `FarbfeldStreamReader::read_all_rows`
+//! 5. `stream_read_all_rows`    — `FarbfeldStreamReader::read_all_rows`
 //!    against an `std::io::Cursor`-backed body.
-//! 6. `stream_write_all_rows`  — `FarbfeldStreamWriter::write_row`
+//! 6. `stream_write_all_rows`   — `FarbfeldStreamWriter::write_row`
 //!    looped to completion, finishing into a `Vec<u8>`.
+//! 7. `stream_read_row_raw`     — `FarbfeldStreamReader::read_row_raw`
+//!    looped row-by-row over the whole body. Symmetric counterpart to
+//!    `stream_read_all_rows` that skips the per-sample BE → native
+//!    decode, so the bench measures the pure row-bytes pump path the
+//!    raw API exposes to proxies / hash-and-discard pipelines / re-mux
+//!    forwarders.
+//! 8. `stream_write_row_raw`    — `FarbfeldStreamWriter::write_row_raw`
+//!    looped to completion against a pre-serialised BE body. Symmetric
+//!    counterpart to `stream_write_all_rows` that forwards already-BE
+//!    bytes verbatim without the per-sample BE swap on emit. Together
+//!    with `stream_read_row_raw`, the two guard the round-11 perf claim
+//!    that the raw pass-through path is faster than its native-endian
+//!    sibling.
 //!
 //! Run all of them with:
 //!
@@ -237,6 +250,66 @@ fn bench_stream_write_all_rows(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_stream_read_row_raw(c: &mut Criterion) {
+    let mut g = c.benchmark_group("stream_read_row_raw");
+    for &(w, h) in SIZES {
+        let pixels = pattern_pixels(w, h);
+        let stream = pattern_full_stream(w, h, &pixels);
+        g.throughput(Throughput::Bytes(stream.len() as u64));
+        g.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &stream,
+            |b, s| {
+                let row_bytes = (w as usize) * 8;
+                b.iter(|| {
+                    let cursor = Cursor::new(black_box(s.as_slice()));
+                    let mut reader =
+                        FarbfeldStreamReader::new(cursor).expect("raw reader header parses");
+                    // Re-use one row buffer across all `height` rows — that's
+                    // the documented use shape for `read_row_raw` (the caller
+                    // owns the buffer; the reader writes into it in place).
+                    let mut row = vec![0u8; row_bytes];
+                    while reader
+                        .read_row_raw(black_box(&mut row))
+                        .expect("raw reader body well-formed")
+                    {
+                        black_box(&row);
+                    }
+                });
+            },
+        );
+    }
+    g.finish();
+}
+
+fn bench_stream_write_row_raw(c: &mut Criterion) {
+    let mut g = c.benchmark_group("stream_write_row_raw");
+    for &(w, h) in SIZES {
+        let pixels = pattern_pixels(w, h);
+        let body_be = pattern_body_be(&pixels);
+        g.throughput(Throughput::Bytes(body_be.len() as u64));
+        g.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &(w, h, body_be),
+            |b, (ww, hh, body)| {
+                let row_bytes = (*ww as usize) * 8;
+                b.iter(|| {
+                    let mut writer = FarbfeldStreamWriter::new(Vec::new(), *ww, *hh)
+                        .expect("raw writer header emits");
+                    for row in body.chunks_exact(row_bytes) {
+                        writer
+                            .write_row_raw(black_box(row))
+                            .expect("write_row_raw well-formed");
+                    }
+                    let out = writer.finish().expect("finish well-formed");
+                    black_box(out);
+                });
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_whole,
@@ -245,5 +318,7 @@ criterion_group!(
     bench_encode_image,
     bench_stream_read_all_rows,
     bench_stream_write_all_rows,
+    bench_stream_read_row_raw,
+    bench_stream_write_row_raw,
 );
 criterion_main!(benches);

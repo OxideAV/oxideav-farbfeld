@@ -9,6 +9,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `benches/codec.rs`: two new Criterion groups —
+  `stream_read_row_raw` and `stream_write_row_raw` — that exercise the
+  raw-bytes pass-through pair (`FarbfeldStreamReader::read_row_raw` /
+  `FarbfeldStreamWriter::write_row_raw`) row-by-row across the same
+  three image sizes (64×64, 256×256, 1024×1024) as the six existing
+  groups. The new groups guard the round-11 perf claim that the raw
+  path is faster than its native-endian sibling because it skips the
+  per-sample BE swap. At 1024×1024 the raw read path measures
+  ~36 GiB/s and the raw write path ~10 GiB/s. Run as
+  `cargo bench -p oxideav-farbfeld -- stream_read_row_raw` /
+  `stream_write_row_raw` (or alongside the rest of the suite).
+
 - `FarbfeldStreamReader::read_row_raw` and
   `FarbfeldStreamWriter::write_row_raw`: a symmetric pair of raw-bytes
   pass-through methods on the streaming API. `read_row_raw` yields the

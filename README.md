@@ -80,7 +80,14 @@ Round 4 added a Criterion micro-benchmark suite (`benches/codec.rs`)
 covering both the in-memory and streaming codecs across three image
 sizes (64×64, 256×256, 1024×1024). Six bench groups exercise the six
 public encode/parse entry points so future changes can spot regressions
-on either path. Round 5 added a deterministic property-style sweep
+on either path. Round 12 extended the suite with two more groups —
+`stream_read_row_raw` and `stream_write_row_raw` — that exercise the
+raw-bytes pass-through pair (`FarbfeldStreamReader::read_row_raw` /
+`FarbfeldStreamWriter::write_row_raw`) row-by-row across the same three
+sizes, guarding the round-11 perf claim that the raw path is faster
+than its native-endian sibling because it skips the per-sample BE swap.
+At 1024×1024 the raw read path measures ~36 GiB/s and the raw write
+path ~10 GiB/s on the bench host. Round 5 added a deterministic property-style sweep
 (`tests/property_sweep.rs`): 96 pseudo-random `(width, height, pixels)`
 triples per shape distribution × six distributions (tiny, square,
 tall-narrow, wide-short, zero-axis, medium) each assert the eight
