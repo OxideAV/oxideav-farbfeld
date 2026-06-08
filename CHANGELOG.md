@@ -9,6 +9,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `FarbfeldImage::pixel(x, y) -> Option<[u16; 4]>` /
+  `set_pixel(x, y, [u16; 4]) -> bool` /
+  `channel(x, y, c) -> Option<u16>` /
+  `row(y) -> Option<&[u16]>` /
+  `row_mut(y) -> Option<&mut [u16]>` /
+  `pixel_count() -> usize`: spatial accessors that let callers index
+  the decoded frame by `(x, y)` (and by single-channel or by whole
+  scan-line) without re-implementing the `(y * width + x) * 4`
+  row-major arithmetic at every call site. All accessors return
+  `Option` and bounds-check against `width` / `height` (and the
+  channel index against `4`); the mutating variants return `false` /
+  do nothing on out-of-bounds writes so callers that loop over
+  `(0..big_w, 0..big_h)` against a smaller frame can't accidentally
+  panic. `row` / `row_mut` borrow a contiguous `width * 4`-sample
+  slice, which is the shape colour-space conversion helpers and
+  per-row downsamplers want. Companion constant
+  [`CHANNELS_PER_PIXEL`] (= 4) is exported at the crate root so
+  external offset arithmetic can name the channel count instead of
+  sprinkling `4`s. Fourteen unit tests cover the in-bounds reads /
+  writes, out-of-bounds rejections, zero-width / zero-height edges,
+  per-channel reads, single-row overwrite, and a row-major-layout
+  consistency check that round-trips every pixel of a 3×2 image
+  through `pixel_offset` → `channel`. Pure-data addition: no codec
+  / parser / encoder behaviour changes, no new dependencies, both
+  feature modes (`registry` and `default-features = false`) build
+  and test clean.
+
 - `benches/codec.rs`: two new Criterion groups —
   `stream_read_row_raw` and `stream_write_row_raw` — that exercise the
   raw-bytes pass-through pair (`FarbfeldStreamReader::read_row_raw` /

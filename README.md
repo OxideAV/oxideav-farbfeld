@@ -100,6 +100,25 @@ truncated body always rejected) run additional PRNG-driven sweeps.
 The sweep is offline / no-extra-dep (xorshift32 inlined) so any
 failure is reproducible from the seed printed in the assertion.
 
+Round 13 added a small family of spatial accessors on
+[`FarbfeldImage`] — `pixel(x, y) -> Option<[u16; 4]>`,
+`set_pixel(x, y, [R, G, B, A])`, `channel(x, y, c) -> Option<u16>`,
+`row(y) -> Option<&[u16]>`, `row_mut(y) -> Option<&mut [u16]>`, and
+`pixel_count() -> usize` — that let callers index the decoded frame
+by `(x, y)` (or by single channel, or by whole scan-line) without
+re-implementing the `(y * width + x) * 4` row-major arithmetic at
+every call site. All accessors bounds-check against `width` /
+`height` (and the channel index against `4`) and return `Option`,
+so a caller looping over a fixed grid against a smaller frame can't
+accidentally panic. A new crate-level constant `CHANNELS_PER_PIXEL`
+(= `4`) is also exported so external offset arithmetic can name the
+channel count instead of hard-coding `4`. Fourteen unit tests cover
+the in-bounds reads/writes, out-of-bounds rejections, zero-width
+and zero-height edges, per-channel reads, single-row overwrite,
+and a row-major-layout consistency round-trip on a 3×2 image. Pure
+addition — no behaviour change to the parser, encoder, or
+streaming I/O.
+
 Round 11 added a raw-bytes pass-through pair on the streaming API —
 [`FarbfeldStreamReader::read_row_raw`] yields the next row's on-disk
 `width * 8` big-endian bytes verbatim into a caller `&mut [u8]` slot,
@@ -220,6 +239,12 @@ let img: FarbfeldImage = parse_farbfeld(&bytes)?;
 assert_eq!(img.width, 1);
 assert_eq!(img.height, 1);
 assert_eq!(img.pixels, [0xFFFF, 0x0000, 0x0000, 0xFFFF]);
+
+// Spatial accessors (round 13) — index by (x, y) instead of
+// reaching into `pixels` with manual `(y * w + x) * 4` arithmetic.
+assert_eq!(img.pixel(0, 0), Some([0xFFFF, 0x0000, 0x0000, 0xFFFF]));
+assert_eq!(img.channel(0, 0, 0), Some(0xFFFF)); // R
+assert_eq!(img.pixel(99, 99), None);            // out of bounds
 # Ok::<(), FarbfeldError>(())
 ```
 
