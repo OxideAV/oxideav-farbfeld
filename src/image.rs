@@ -157,6 +157,121 @@ impl FarbfeldImage {
         (self.width as usize) * (self.height as usize)
     }
 
+    /// Iterate the frame's scan lines top-to-bottom, yielding each row
+    /// as a contiguous `&[u16]` slice of `width * 4` samples in
+    /// `[R, G, B, A, R, G, B, A, …]` order.
+    ///
+    /// This is the sequential counterpart to [`row`]: it walks every
+    /// row exactly once without the caller having to thread a `y`
+    /// counter or re-check `Some`/`None` on each step. The iterator
+    /// yields exactly `height` items; for a `width == 0` frame each
+    /// yielded slice is empty (but the row count still equals `height`),
+    /// matching [`row`]'s zero-width contract.
+    ///
+    /// Built on [`slice::chunks_exact`] over [`pixels`], so the
+    /// iterator is allocation-free and the per-step cost is a pointer
+    /// bump. A `height == 0` frame yields nothing.
+    ///
+    /// ```
+    /// use oxideav_farbfeld::FarbfeldImage;
+    ///
+    /// // 1×3 image, one distinct red value per row.
+    /// let img = FarbfeldImage::new(
+    ///     1,
+    ///     3,
+    ///     vec![
+    ///         0x0001, 0, 0, 0xFFFF, // row 0
+    ///         0x0002, 0, 0, 0xFFFF, // row 1
+    ///         0x0003, 0, 0, 0xFFFF, // row 2
+    ///     ],
+    /// )
+    /// .unwrap();
+    /// let reds: Vec<u16> = img.rows().map(|r| r[0]).collect();
+    /// assert_eq!(reds, [1, 2, 3]);
+    /// ```
+    ///
+    /// [`row`]: FarbfeldImage::row
+    /// [`pixels`]: FarbfeldImage::pixels
+    pub fn rows(&self) -> Rows<'_> {
+        Rows {
+            inner: self.chunked(&self.pixels),
+        }
+    }
+
+    /// Mutable counterpart to [`rows`]: yields each scan line as a
+    /// `&mut [u16]` of `width * 4` samples so a caller can rewrite the
+    /// frame one row at a time in a single pass.
+    ///
+    /// Same `height`-item, zero-width-yields-empty-slice contract as
+    /// [`rows`]; built on [`slice::chunks_exact_mut`].
+    ///
+    /// [`rows`]: FarbfeldImage::rows
+    pub fn rows_mut(&mut self) -> RowsMut<'_> {
+        // A `width == 0` frame has a zero-length row stride; chunks of
+        // size 0 are forbidden, so route that case through an empty
+        // iterator that still reports `height` rows below.
+        let row_samples = (self.width as usize) * CHANNELS_PER_PIXEL;
+        let height = self.height as usize;
+        if row_samples == 0 {
+            RowsMut {
+                inner: [].chunks_exact_mut(1),
+                zero_width_remaining: height,
+            }
+        } else {
+            RowsMut {
+                inner: self.pixels.chunks_exact_mut(row_samples),
+                zero_width_remaining: 0,
+            }
+        }
+    }
+
+    /// Iterate the frame's pixels in row-major scan order, yielding each
+    /// as an owned `[R, G, B, A]` native-endian `u16` quad.
+    ///
+    /// The sequential counterpart to [`pixel`]: it visits every pixel
+    /// once (`pixel_count` items total) without the caller threading
+    /// `(x, y)` or unwrapping `Option` per step. Built on
+    /// [`slice::chunks_exact`] of width 4 over [`pixels`]; each yielded
+    /// quad is a value-copy, so the iterator borrows the frame immutably
+    /// and is allocation-free.
+    ///
+    /// ```
+    /// use oxideav_farbfeld::FarbfeldImage;
+    ///
+    /// let img = FarbfeldImage::new(
+    ///     2,
+    ///     1,
+    ///     vec![0xFFFF, 0, 0, 0xFFFF, 0, 0xFFFF, 0, 0xFFFF],
+    /// )
+    /// .unwrap();
+    /// let quads: Vec<[u16; 4]> = img.pixels().collect();
+    /// assert_eq!(quads, [[0xFFFF, 0, 0, 0xFFFF], [0, 0xFFFF, 0, 0xFFFF]]);
+    /// ```
+    ///
+    /// [`pixel`]: FarbfeldImage::pixel
+    /// [`pixels`]: FarbfeldImage::pixels
+    pub fn pixels(&self) -> Pixels<'_> {
+        Pixels {
+            inner: self.pixels.chunks_exact(CHANNELS_PER_PIXEL),
+        }
+    }
+
+    /// Build a `chunks_exact` iterator over `slice` whose chunk size is
+    /// this frame's per-row sample count (`width * 4`), translating the
+    /// degenerate `width == 0` case (chunk size 0, which `chunks_exact`
+    /// forbids) into an empty-slice walker that still reports `height`
+    /// rows. Shared by [`rows`](FarbfeldImage::rows).
+    fn chunked<'a>(&self, slice: &'a [u16]) -> RowChunks<'a> {
+        let row_samples = (self.width as usize) * CHANNELS_PER_PIXEL;
+        if row_samples == 0 {
+            RowChunks::ZeroWidth {
+                remaining: self.height as usize,
+            }
+        } else {
+            RowChunks::Sized(slice.chunks_exact(row_samples))
+        }
+    }
+
     // ---- internals ----
 
     /// Resolve `(x, y)` to the starting offset in [`pixels`] for the
@@ -184,6 +299,136 @@ impl FarbfeldImage {
         let lo = (y as usize) * row_samples;
         let hi = lo + row_samples;
         Some((lo, hi))
+    }
+}
+
+/// Internal scan-line chunker that bridges the normal
+/// [`slice::chunks_exact`] path and the degenerate `width == 0` case
+/// (chunk size 0 is rejected by `chunks_exact`, yet a zero-width frame
+/// still has `height` well-defined empty rows).
+enum RowChunks<'a> {
+    /// Normal path: `width > 0`, so the row stride is non-zero.
+    Sized(std::slice::ChunksExact<'a, u16>),
+    /// `width == 0`: emit `remaining` empty rows then stop.
+    ZeroWidth { remaining: usize },
+}
+
+impl<'a> Iterator for RowChunks<'a> {
+    type Item = &'a [u16];
+
+    fn next(&mut self) -> Option<&'a [u16]> {
+        match self {
+            RowChunks::Sized(c) => c.next(),
+            RowChunks::ZeroWidth { remaining } => {
+                if *remaining == 0 {
+                    None
+                } else {
+                    *remaining -= 1;
+                    Some(&[])
+                }
+            }
+        }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len();
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for RowChunks<'_> {
+    fn len(&self) -> usize {
+        match self {
+            RowChunks::Sized(c) => c.len(),
+            RowChunks::ZeroWidth { remaining } => *remaining,
+        }
+    }
+}
+
+/// Iterator over a [`FarbfeldImage`]'s scan lines, yielding each row as
+/// a `&[u16]` slice of `width * 4` samples. Created by
+/// [`FarbfeldImage::rows`].
+pub struct Rows<'a> {
+    inner: RowChunks<'a>,
+}
+
+impl<'a> Iterator for Rows<'a> {
+    type Item = &'a [u16];
+
+    fn next(&mut self) -> Option<&'a [u16]> {
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        self.inner.size_hint()
+    }
+}
+
+impl ExactSizeIterator for Rows<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
+    }
+}
+
+/// Mutable iterator over a [`FarbfeldImage`]'s scan lines, yielding each
+/// row as a `&mut [u16]` slice of `width * 4` samples. Created by
+/// [`FarbfeldImage::rows_mut`].
+pub struct RowsMut<'a> {
+    inner: std::slice::ChunksExactMut<'a, u16>,
+    /// Number of empty rows still to emit in the `width == 0` case
+    /// (zero in the normal path, where `inner` does all the work).
+    zero_width_remaining: usize,
+}
+
+impl<'a> Iterator for RowsMut<'a> {
+    type Item = &'a mut [u16];
+
+    fn next(&mut self) -> Option<&'a mut [u16]> {
+        if self.zero_width_remaining > 0 {
+            self.zero_width_remaining -= 1;
+            return Some(&mut []);
+        }
+        self.inner.next()
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.len();
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for RowsMut<'_> {
+    fn len(&self) -> usize {
+        self.inner.len() + self.zero_width_remaining
+    }
+}
+
+/// Iterator over a [`FarbfeldImage`]'s pixels in row-major scan order,
+/// yielding each as an owned `[R, G, B, A]` `u16` quad. Created by
+/// [`FarbfeldImage::pixels`].
+pub struct Pixels<'a> {
+    inner: std::slice::ChunksExact<'a, u16>,
+}
+
+impl Iterator for Pixels<'_> {
+    type Item = [u16; CHANNELS_PER_PIXEL];
+
+    fn next(&mut self) -> Option<[u16; CHANNELS_PER_PIXEL]> {
+        // `chunks_exact(4)` guarantees every yielded slice is exactly
+        // four samples long, so the array conversion can't fail; map it
+        // to a value-copy quad.
+        self.inner.next().map(|c| [c[0], c[1], c[2], c[3]])
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        let n = self.inner.len();
+        (n, Some(n))
+    }
+}
+
+impl ExactSizeIterator for Pixels<'_> {
+    fn len(&self) -> usize {
+        self.inner.len()
     }
 }
 
@@ -333,6 +578,139 @@ mod tests {
         assert_eq!(red_green_image().pixel_count(), 2);
         let big = FarbfeldImage::new(64, 32, vec![0u16; 64 * 32 * 4]).unwrap();
         assert_eq!(big.pixel_count(), 64 * 32);
+    }
+
+    #[test]
+    fn rows_iter_yields_every_scan_line_in_order() {
+        // 1×3 image, one distinct red value per row.
+        let img = FarbfeldImage::new(
+            1,
+            3,
+            vec![
+                0x0001, 0, 0, 0xFFFF, // row 0
+                0x0002, 0, 0, 0xFFFF, // row 1
+                0x0003, 0, 0, 0xFFFF, // row 2
+            ],
+        )
+        .unwrap();
+        let collected: Vec<&[u16]> = img.rows().collect();
+        assert_eq!(collected.len(), 3);
+        assert_eq!(collected[0], &[0x0001, 0, 0, 0xFFFF]);
+        assert_eq!(collected[1], &[0x0002, 0, 0, 0xFFFF]);
+        assert_eq!(collected[2], &[0x0003, 0, 0, 0xFFFF]);
+    }
+
+    #[test]
+    fn rows_iter_agrees_with_row_accessor() {
+        let img = FarbfeldImage::new(
+            2,
+            2,
+            vec![
+                0, 1, 2, 3, 4, 5, 6, 7, // row 0
+                8, 9, 10, 11, 12, 13, 14, 15, // row 1
+            ],
+        )
+        .unwrap();
+        for (y, r) in img.rows().enumerate() {
+            assert_eq!(r, img.row(y as u32).unwrap());
+        }
+    }
+
+    #[test]
+    fn rows_iter_is_exact_sized() {
+        let img = FarbfeldImage::new(2, 3, vec![0u16; 2 * 3 * 4]).unwrap();
+        let mut it = img.rows();
+        assert_eq!(it.len(), 3);
+        assert_eq!(it.size_hint(), (3, Some(3)));
+        it.next();
+        assert_eq!(it.len(), 2);
+    }
+
+    #[test]
+    fn rows_iter_zero_width_yields_height_empty_rows() {
+        // 0×3 — three rows, each an empty slice.
+        let img = FarbfeldImage::new(0, 3, vec![]).unwrap();
+        let collected: Vec<&[u16]> = img.rows().collect();
+        assert_eq!(collected.len(), 3);
+        assert!(collected.iter().all(|r| r.is_empty()));
+        // ExactSize reports the right count up front.
+        assert_eq!(img.rows().len(), 3);
+    }
+
+    #[test]
+    fn rows_iter_zero_height_yields_nothing() {
+        let img = FarbfeldImage::new(5, 0, vec![]).unwrap();
+        assert_eq!(img.rows().count(), 0);
+        assert_eq!(img.rows().len(), 0);
+    }
+
+    #[test]
+    fn rows_mut_lets_caller_rewrite_each_row_in_one_pass() {
+        let mut img = FarbfeldImage::new(2, 2, vec![0u16; 2 * 2 * 4]).unwrap();
+        for (y, r) in img.rows_mut().enumerate() {
+            for s in r.iter_mut() {
+                *s = (y as u16) + 1;
+            }
+        }
+        assert_eq!(img.row(0).unwrap(), &[1u16; 8]);
+        assert_eq!(img.row(1).unwrap(), &[2u16; 8]);
+    }
+
+    #[test]
+    fn rows_mut_zero_width_yields_height_empty_rows() {
+        let mut img = FarbfeldImage::new(0, 4, vec![]).unwrap();
+        let mut count = 0;
+        for r in img.rows_mut() {
+            assert!(r.is_empty());
+            count += 1;
+        }
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn pixels_iter_yields_every_pixel_in_scan_order() {
+        let img = red_green_image();
+        let quads: Vec<[u16; 4]> = img.pixels().collect();
+        assert_eq!(
+            quads,
+            vec![
+                [0xFFFF, 0x0000, 0x0000, 0xFFFF],
+                [0x0000, 0xFFFF, 0x0000, 0xFFFF],
+            ]
+        );
+    }
+
+    #[test]
+    fn pixels_iter_agrees_with_pixel_accessor() {
+        // 3×2 image with a distinct value per channel per pixel.
+        let mut pixels = vec![0u16; 3 * 2 * CHANNELS_PER_PIXEL];
+        for (i, p) in pixels.iter_mut().enumerate() {
+            *p = i as u16;
+        }
+        let img = FarbfeldImage::new(3, 2, pixels).unwrap();
+        let mut iter = img.pixels();
+        for y in 0..2 {
+            for x in 0..3 {
+                assert_eq!(iter.next(), img.pixel(x, y));
+            }
+        }
+        assert_eq!(iter.next(), None);
+    }
+
+    #[test]
+    fn pixels_iter_count_matches_pixel_count_and_is_exact_sized() {
+        let img = FarbfeldImage::new(4, 5, vec![0u16; 4 * 5 * 4]).unwrap();
+        assert_eq!(img.pixels().count(), img.pixel_count());
+        assert_eq!(img.pixels().len(), 20);
+        assert_eq!(img.pixels().size_hint(), (20, Some(20)));
+    }
+
+    #[test]
+    fn pixels_iter_empty_for_zero_dim() {
+        let img = FarbfeldImage::new(0, 0, vec![]).unwrap();
+        assert_eq!(img.pixels().count(), 0);
+        let img = FarbfeldImage::new(0, 7, vec![]).unwrap();
+        assert_eq!(img.pixels().count(), 0);
     }
 
     #[test]

@@ -73,7 +73,7 @@ pub const CODEC_ID_STR: &str = "farbfeld";
 
 pub use encoder::{encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image};
 pub use error::{FarbfeldError, Result};
-pub use image::{FarbfeldImage, CHANNELS_PER_PIXEL};
+pub use image::{FarbfeldImage, Pixels, Rows, RowsMut, CHANNELS_PER_PIXEL};
 pub use parser::{
     parse_farbfeld, parse_farbfeld_header, peek_farbfeld_dimensions, FarbfeldHeader,
     BYTES_PER_PIXEL, HEADER_LEN, MAGIC,

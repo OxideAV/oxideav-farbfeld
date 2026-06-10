@@ -119,6 +119,26 @@ and a row-major-layout consistency round-trip on a 3×2 image. Pure
 addition — no behaviour change to the parser, encoder, or
 streaming I/O.
 
+Round 14 added sequential iterator primitives on [`FarbfeldImage`] —
+`rows() -> Rows` (each scan line as `&[u16]`), `rows_mut() -> RowsMut`
+(each scan line as `&mut [u16]`), and `pixels() -> Pixels` (each pixel
+as an owned `[R, G, B, A]` quad). These are the sequential counterpart
+to the round-13 random-access accessors (`row` / `row_mut` / `pixel`):
+a caller walking the whole frame once no longer threads a `y` (or
+`(x, y)`) counter or re-unwraps `Option` per step. All three are built
+on `slice::chunks_exact` / `chunks_exact_mut` over `pixels`, so they are
+allocation-free, and all three are `ExactSizeIterator` (`rows` /
+`rows_mut` report `height`, `pixels` reports `pixel_count`). The
+degenerate `width == 0` frame is handled explicitly: `rows` /
+`rows_mut` still yield exactly `height` empty slices (matching `row`'s
+zero-width contract) rather than zero rows, since `chunks_exact`
+forbids a zero-length chunk. Thirteen unit tests cover ordered
+traversal, accessor agreement, exact-size accounting, the zero-width
+(height empty rows) and zero-height (no rows) edges, and one-pass
+mutable rewrite. The three iterator types (`Rows`, `RowsMut`,
+`Pixels`) are re-exported from the crate root. Pure addition — no
+behaviour change to the parser, encoder, or streaming I/O.
+
 Round 11 added a raw-bytes pass-through pair on the streaming API —
 [`FarbfeldStreamReader::read_row_raw`] yields the next row's on-disk
 `width * 8` big-endian bytes verbatim into a caller `&mut [u8]` slot,
@@ -207,6 +227,7 @@ group).
 | Fuzzing (encode)                | `cargo-fuzz` target (3 whole-file paths + streaming writer agree, 6 invariants + 2 rejection probes), 601 312 runs / 61 s clean |
 | Fuzzing (streaming I/O)         | `cargo-fuzz` target — `FarbfeldStreamReader` / `FarbfeldStreamWriter` over a choppy `Read` / `Write` transport (1..=8-byte chunks), 5 invariants + truncation probe, 2 548 637 runs / 61 s clean |
 | Property sweep (PRNG)           | 8 invariants × 6 shape distributions × 96 iters + 4 malformed-input scenarios |
+| Frame accessors                 | random-access (`pixel` / `set_pixel` / `channel` / `row` / `row_mut`) + sequential iterators (`rows` / `rows_mut` / `pixels`, all `ExactSizeIterator`) |
 
 ## API
 
@@ -245,6 +266,12 @@ assert_eq!(img.pixels, [0xFFFF, 0x0000, 0x0000, 0xFFFF]);
 assert_eq!(img.pixel(0, 0), Some([0xFFFF, 0x0000, 0x0000, 0xFFFF]));
 assert_eq!(img.channel(0, 0, 0), Some(0xFFFF)); // R
 assert_eq!(img.pixel(99, 99), None);            // out of bounds
+
+// Sequential iterators (round 14) — walk the whole frame once
+// without threading a (x, y) counter. All three are ExactSizeIterator.
+assert_eq!(img.rows().len(), 1);
+let quads: Vec<[u16; 4]> = img.pixels().collect();
+assert_eq!(quads, [[0xFFFF, 0x0000, 0x0000, 0xFFFF]]);
 # Ok::<(), FarbfeldError>(())
 ```
 
