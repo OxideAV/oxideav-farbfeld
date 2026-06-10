@@ -100,6 +100,21 @@ truncated body always rejected) run additional PRNG-driven sweeps.
 The sweep is offline / no-extra-dep (xorshift32 inlined) so any
 failure is reproducible from the seed printed in the assertion.
 
+Round 275 hardened the header size arithmetic with a dedicated
+dimension-overflow sweep (`tests/dimension_overflow.rs`). It drives a
+real 16-byte header carrying pathological `u32` dimensions (boundary
+points plus 4096 PRNG-driven pairs biased to the high `u32` band)
+through `parse_farbfeld_header` / `peek_farbfeld_dimensions` /
+[`FarbfeldHeader::total_len`] and cross-checks the announced
+`width * height * 8` body length against an independent `u128` oracle.
+Five invariants hold for every input: no panic on any `u32` pair;
+body-length exactness against the oracle when the product fits `usize`;
+overflow reported (never silently wrapped) when it doesn't; `total_len`
+either equals `16 + body_len` or rejects exactly when that sum overflows
+`usize`; and a header-only file announcing a multi-gigabyte body is
+rejected via the announced-vs-present cross-check without allocating the
+announced body. Pure test addition — no behaviour change.
+
 Round 13 added a small family of spatial accessors on
 [`FarbfeldImage`] — `pixel(x, y) -> Option<[u16; 4]>`,
 `set_pixel(x, y, [R, G, B, A])`, `channel(x, y, c) -> Option<u16>`,
@@ -222,7 +237,7 @@ group).
 | Round-trip (vs `magick`)        | exact (bit-identical, when present)|
 | Container demux                 | full                              |
 | Container mux                   | full                              |
-| DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes |
+| DoS hardening (crafted header)  | whole-file + streaming bounded by delivered bytes; dimension-overflow sweep (4096 PRNG `u32` pairs + boundary points) cross-checks `width*height*8` vs a `u128` oracle, no panic / no silent wrap |
 | Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
 | Fuzzing (encode)                | `cargo-fuzz` target (3 whole-file paths + streaming writer agree, 6 invariants + 2 rejection probes), 601 312 runs / 61 s clean |
 | Fuzzing (streaming I/O)         | `cargo-fuzz` target — `FarbfeldStreamReader` / `FarbfeldStreamWriter` over a choppy `Read` / `Write` transport (1..=8-byte chunks), 5 invariants + truncation probe, 2 548 637 runs / 61 s clean |

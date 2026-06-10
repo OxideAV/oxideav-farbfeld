@@ -9,6 +9,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `tests/dimension_overflow.rs`: dimension-overflow hardening sweep for
+  the header size arithmetic. Drives a **real 16-byte header** carrying
+  pathological `u32` dimensions (boundary points plus 4096 PRNG-driven
+  pairs biased to the high `u32` band) through `parse_farbfeld_header` /
+  `peek_farbfeld_dimensions` / `FarbfeldHeader::total_len`, and
+  cross-checks the announced `width * height * 8` body length against an
+  independent `u128` oracle. Asserts five invariants: no panic on any
+  `u32` pair; body-length exactness vs the oracle when the product fits
+  `usize`; overflow reported (never silently wrapped) when it doesn't;
+  `total_len()` either equals `16 + body_len` or rejects exactly when
+  that sum overflows `usize`; and a header-only file announcing a
+  multi-gigabyte body is rejected via the announced-vs-present
+  cross-check without allocating the announced body. Pure test addition
+  — no behaviour change.
 - `FarbfeldImage::pixel(x, y) -> Option<[u16; 4]>` /
   `set_pixel(x, y, [u16; 4]) -> bool` /
   `channel(x, y, c) -> Option<u16>` /
