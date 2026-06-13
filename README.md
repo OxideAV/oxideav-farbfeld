@@ -115,6 +115,22 @@ either equals `16 + body_len` or rejects exactly when that sum overflows
 rejected via the announced-vs-present cross-check without allocating the
 announced body. Pure test addition — no behaviour change.
 
+Round 289 sped up the streaming convenience drain
+([`FarbfeldStreamReader::read_all_rows`]) with a bit-identical change:
+each row is now decoded directly into the output `Vec`'s spare
+(uninitialised) capacity (`reserve` + `decode_be_samples` into
+`spare_capacity_mut` + `set_len`) instead of `resize(.., 0)`-ing the new
+tail to zero and immediately overwriting every slot. The per-row memset
+was redundant — the big-endian swap writes all `width * 4` new samples —
+so dropping it raised `stream_read_all_rows` throughput ~7.3 → ~8.8 GiB/s
+at 1024×1024 (~+20%), ~19.0 → ~25.2 GiB/s at 256×256 (~+32%), and
+~13.8 → ~15.5 GiB/s at 64×64 (~+12%) on the bench host. The DoS bound is
+unchanged: capacity still grows one delivered row at a time, so a header
+announcing a giant body that ships no bytes fails on the first short read
+having reserved nothing. A new unit test locks the output byte-identical
+to the whole-file `parse_farbfeld` decoder for both the fresh-reader and
+partial-`read_row`-drain growth paths.
+
 Round 13 added a small family of spatial accessors on
 [`FarbfeldImage`] — `pixel(x, y) -> Option<[u16; 4]>`,
 `set_pixel(x, y, [R, G, B, A])`, `channel(x, y, c) -> Option<u16>`,
@@ -220,7 +236,7 @@ parse/encode inversion check. Measured speedups on the
 | `encode_raw_be`               | ~78 GiB/s (memcpy-bound)   |
 | `encode_from_rgba16`          | ~47 GiB/s (was ~5.4 GiB/s) |
 | `encode_image`                | ~46 GiB/s (was ~4.7 GiB/s) |
-| `stream_read_all_rows`        | ~8 GiB/s (was ~2.3 GiB/s)  |
+| `stream_read_all_rows`        | ~8.8 GiB/s (r289; was ~2.3 GiB/s) |
 | `stream_write_all_rows`       | ~10 GiB/s (was ~7.9 GiB/s) |
 
 Run with `cargo bench -p oxideav-farbfeld` (or

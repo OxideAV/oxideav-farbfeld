@@ -328,21 +328,51 @@ impl<R: Read> FarbfeldStreamReader<R> {
         // ahead of the body bytes. Honour any rows already consumed via
         // `read_row` by draining from `rows_read` to `height`.
         //
-        // Per-row growth uses `extend(repeat_n(0, row_samples))` +
-        // `decode_be_samples` over the freshly-grown tail so the inner
-        // BE swap runs through the shared SIMD-friendly helper instead
-        // of a `push`-per-sample loop. `Vec::extend` from a `RepeatN`
-        // adapter compiles down to a single `extend_with` (memset) +
-        // length update, so the row's slots are zero-initialised in
-        // one bulk store before the BE swap fills them.
+        // Per-row growth `reserve`s exactly `row_samples` extra slots and
+        // decodes the freshly-read body straight into the `Vec`'s spare
+        // (uninitialised) capacity through the shared SIMD-friendly
+        // `decode_be_samples` helper, then bumps the length with
+        // `set_len`. This skips the per-row zero-init that a
+        // `resize(.., 0)` would do: `decode_be_samples` writes every one
+        // of the `row_samples` new slots (its `body.len() == row_bytes ==
+        // row_samples * 2` contract is enforced by the truncation check
+        // in `read_row_bytes`), so the tail is fully initialised by the
+        // BE swap with no preceding memset. Capacity still grows only by
+        // the bytes a row actually delivered, preserving the DoS bound:
+        // `reserve` runs after the bounded `read_row_bytes` succeeded, so
+        // a header announcing a giant body that ships no bytes fails on
+        // the first short read having reserved nothing.
         let mut out: Vec<u16> = Vec::new();
         while self.rows_read < self.header.height {
             // `read_row_bytes` returns false only for the zero-width
             // (no body) case; the row is still counted toward `height`.
             if self.read_row_bytes()? {
                 let prev_len = out.len();
-                out.resize(prev_len + row_samples, 0);
-                decode_be_samples(&self.row_buf, &mut out[prev_len..]);
+                out.reserve(row_samples);
+                // SAFETY: `reserve(row_samples)` guarantees at least
+                // `row_samples` slots of spare capacity at `prev_len`, so
+                // the `&mut [u16]` view over `spare_capacity_mut()[..
+                // row_samples]` reborrowed as initialised `u16` is in
+                // bounds. `decode_be_samples` fills exactly those
+                // `row_samples` slots (`row_buf.len() == row_bytes ==
+                // row_samples * 2` after a successful bounded read), so
+                // every slot is initialised before `set_len` exposes it.
+                // `u16` has no invalid bit patterns, so even a
+                // contract-violating partial fill could not produce an
+                // invalid value — but the truncation check above rules
+                // that out regardless.
+                let spare = out.spare_capacity_mut();
+                let tail = unsafe {
+                    core::slice::from_raw_parts_mut(spare.as_mut_ptr() as *mut u16, row_samples)
+                };
+                decode_be_samples(&self.row_buf, tail);
+                // SAFETY: the `row_samples` newly-written slots starting
+                // at `prev_len` are now initialised by `decode_be_samples`
+                // above; growing the length by exactly that count exposes
+                // only initialised memory.
+                unsafe {
+                    out.set_len(prev_len + row_samples);
+                }
             }
             self.rows_read += 1;
         }
@@ -1088,5 +1118,56 @@ mod tests {
         }
         let encoded = writer.finish().unwrap();
         assert_eq!(encoded, reference);
+    }
+
+    #[test]
+    fn read_all_rows_spare_capacity_decode_is_bit_identical_to_whole_file() {
+        // `read_all_rows` decodes each row straight into the output
+        // `Vec`'s spare (uninitialised) capacity and then `set_len`s past
+        // it, skipping the per-row zero-init. Lock that this produces the
+        // exact same flat sample buffer the whole-file `parse_farbfeld`
+        // decoder yields — both for a fresh reader (the `prev_len == 0`
+        // first row) and after a partial `read_row` drain (the
+        // `prev_len != 0` mid-buffer growth path), across a width whose
+        // row sample count is not a multiple of the SIMD lane width.
+        use crate::parse_farbfeld;
+
+        for &(w, h) in &[(1u32, 1u32), (3, 5), (7, 1), (1, 9), (13, 11)] {
+            let mut samples = Vec::new();
+            for y in 0..h {
+                for x in 0..w {
+                    let v = (y.wrapping_mul(w).wrapping_add(x)) as u16;
+                    samples.push(v.wrapping_mul(0x0123).wrapping_add(0xBEEF));
+                    samples.push(v.wrapping_mul(0x4567));
+                    samples.push(v.wrapping_mul(0x89AB).wrapping_add(0x0F0F));
+                    samples.push(v.wrapping_mul(0xCDEF));
+                }
+            }
+            let bytes = synth(w, h, &samples);
+            let whole = parse_farbfeld(&bytes).unwrap();
+
+            // Fresh reader: every row taken by `read_all_rows`.
+            let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
+            let all = reader.read_all_rows().unwrap();
+            assert_eq!(all, whole.pixels, "fresh read_all_rows mismatch at {w}x{h}");
+
+            // Partial drain: consume the first row via `read_row` (when
+            // there is one), then let `read_all_rows` grow the buffer from
+            // a non-zero starting length for the remaining rows. The
+            // concatenation must still equal the whole-file decode.
+            if h >= 1 {
+                let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
+                let row_samples = (w as usize) * 4;
+                let mut first = vec![0u16; row_samples];
+                assert!(reader.read_row(&mut first).unwrap());
+                let rest = reader.read_all_rows().unwrap();
+                let mut joined = first;
+                joined.extend_from_slice(&rest);
+                assert_eq!(
+                    joined, whole.pixels,
+                    "partial-drain read_all_rows mismatch at {w}x{h}"
+                );
+            }
+        }
     }
 }

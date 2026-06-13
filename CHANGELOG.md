@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `FarbfeldStreamReader::read_all_rows` now decodes each row straight
+  into the output `Vec`'s spare (uninitialised) capacity and then bumps
+  the length with `set_len`, instead of `resize(.., 0)`-ing the new tail
+  to zero before immediately overwriting every slot via
+  `decode_be_samples`. The per-row zero-init was redundant work: the BE
+  swap writes all `width * 4` new samples (its `row_buf.len() ==
+  width * 8` precondition is enforced by the bounded truncation check in
+  `read_row_bytes`), so the tail is fully initialised without a
+  preceding memset. The DoS bound is unchanged — capacity still grows by
+  one delivered row at a time (`reserve` runs only after a bounded row
+  read succeeds), so a header announcing a multi-gigabyte body that ships
+  no bytes still fails on the first short read having reserved nothing.
+  Bit-identical output (no behaviour change). Measured on the 1024×1024
+  release-build bench (4 MiB body): `stream_read_all_rows` ~7.3 → ~8.8
+  GiB/s (~+20%); 256×256 ~19.0 → ~25.2 GiB/s (~+32%); 64×64 ~13.8 → ~15.5
+  GiB/s (~+12%). New unit test
+  `read_all_rows_spare_capacity_decode_is_bit_identical_to_whole_file`
+  locks the output against `parse_farbfeld` across five shapes for both
+  the fresh-reader (`prev_len == 0`) and partial-`read_row`-drain
+  (`prev_len != 0`) growth paths.
+
 ### Added
 
 - `tests/dimension_overflow.rs`: dimension-overflow hardening sweep for
