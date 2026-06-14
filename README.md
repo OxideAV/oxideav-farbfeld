@@ -87,7 +87,20 @@ raw-bytes pass-through pair (`FarbfeldStreamReader::read_row_raw` /
 sizes, guarding the round-11 perf claim that the raw path is faster
 than its native-endian sibling because it skips the per-sample BE swap.
 At 1024×1024 the raw read path measures ~36 GiB/s and the raw write
-path ~10 GiB/s on the bench host. Round 5 added a deterministic property-style sweep
+path ~10 GiB/s on the bench host. Round 298 added a ninth group —
+`stream_skip_row` — exercising the row-window decode floor
+([`FarbfeldStreamReader::skip_row`] looped over the whole body: it
+consumes each row's bytes under the same bounded `Read::take` discipline
+as `read_row` but performs neither the per-sample big-endian decode nor
+the verbatim byte copy into a caller slot, so it's the fastest way to
+walk rows a partial decoder discards — thumbnail row, scan-line
+inspection, "rows N..M of a multi-gigapixel stream"). On the bench host
+it climbs from ~38.6 GiB/s at 64×64 to ~61.1 GiB/s at 256×256 to
+~67.8 GiB/s at 1024×1024 (the fixed header-parse cost amortised over a
+larger body), comfortably ahead of `stream_read_row_raw` which
+additionally copies each row out. The round also added a `BENCHMARKS.md`
+collecting the group descriptions and a regression baseline table in one
+place. Round 5 added a deterministic property-style sweep
 (`tests/property_sweep.rs`): 96 pseudo-random `(width, height, pixels)`
 triples per shape distribution × six distributions (tiny, square,
 tall-narrow, wide-short, zero-axis, medium) each assert the eight

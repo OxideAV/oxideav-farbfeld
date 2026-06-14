@@ -31,6 +31,15 @@
 //!    with `stream_read_row_raw`, the two guard the round-11 perf claim
 //!    that the raw pass-through path is faster than its native-endian
 //!    sibling.
+//! 9. `stream_skip_row`         — `FarbfeldStreamReader::skip_row`
+//!    looped row-by-row over the whole body. This is the row-window
+//!    decode path: the caller only wants rows N..M of a multi-gigapixel
+//!    stream (thumbnail row, scan-line inspection, partial decode) and
+//!    advances past the rest. `skip_row` runs the same bounded
+//!    `Read::take` body-consume discipline as `read_row` / `read_row_raw`
+//!    but performs neither the per-sample BE → native decode nor the
+//!    verbatim byte copy into a caller slot, so this group is the
+//!    floor for how fast the reader can walk a body it doesn't keep.
 //!
 //! Run all of them with:
 //!
@@ -310,6 +319,32 @@ fn bench_stream_write_row_raw(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_stream_skip_row(c: &mut Criterion) {
+    let mut g = c.benchmark_group("stream_skip_row");
+    for &(w, h) in SIZES {
+        let pixels = pattern_pixels(w, h);
+        let stream = pattern_full_stream(w, h, &pixels);
+        g.throughput(Throughput::Bytes(stream.len() as u64));
+        g.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &stream,
+            |b, s| {
+                b.iter(|| {
+                    let cursor = Cursor::new(black_box(s.as_slice()));
+                    let mut reader =
+                        FarbfeldStreamReader::new(cursor).expect("skip reader header parses");
+                    // Walk the whole body via the row-window path: consume
+                    // each row's bytes without decoding to samples or
+                    // copying them out. This is the partial-decode floor.
+                    while reader.skip_row().expect("skip reader body well-formed") {}
+                    black_box(reader.rows_read());
+                });
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_whole,
@@ -320,5 +355,6 @@ criterion_group!(
     bench_stream_write_all_rows,
     bench_stream_read_row_raw,
     bench_stream_write_row_raw,
+    bench_stream_skip_row,
 );
 criterion_main!(benches);

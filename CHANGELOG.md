@@ -32,6 +32,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `benches/codec.rs`: ninth Criterion group `stream_skip_row`,
+  exercising the row-window decode floor — `FarbfeldStreamReader::skip_row`
+  looped over the whole body across the three suite sizes (64×64,
+  256×256, 1024×1024). `skip_row` runs the same bounded `Read::take`
+  body-consume discipline as `read_row` / `read_row_raw` but performs
+  neither the per-sample big-endian → native decode nor the verbatim
+  byte copy into a caller slot, so the group is the floor for how fast
+  the reader can walk a body it doesn't keep (partial / row-window
+  decode: thumbnail row, scan-line inspection, "rows N..M of a
+  multi-gigapixel stream"). Baseline on the bench host: ~38.6 GiB/s at
+  64×64, ~61.1 GiB/s at 256×256, ~67.8 GiB/s at 1024×1024 — ahead of
+  `stream_read_row_raw` (~36 GiB/s at 1024×1024), which additionally
+  copies each row out. Pure bench addition — no behaviour change.
+- `BENCHMARKS.md`: collects every bench group's description and a
+  regression baseline table (bench host + `rustc` version recorded) in
+  one place, replacing the per-round figures previously scattered across
+  `README.md`.
 - `tests/dimension_overflow.rs`: dimension-overflow hardening sweep for
   the header size arithmetic. Drives a **real 16-byte header** carrying
   pathological `u32` dimensions (boundary points plus 4096 PRNG-driven
