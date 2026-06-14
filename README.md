@@ -183,6 +183,24 @@ mutable rewrite. The three iterator types (`Rows`, `RowsMut`,
 `Pixels`) are re-exported from the crate root. Pure addition — no
 behaviour change to the parser, encoder, or streaming I/O.
 
+Round 305 made all three round-14 iterators (`Rows`, `RowsMut`,
+`Pixels`) `DoubleEndedIterator`, so a caller can walk scan lines or
+pixels back-to-front with `.rev()` / `.next_back()` — bottom-up row
+traversal, vertical flips, or meeting in the middle from both ends —
+without manually re-indexing the flat `pixels` buffer. The underlying
+`slice::chunks_exact` / `chunks_exact_mut` already supported reverse
+iteration; this just surfaces it on the public iterator types. Each
+stays `ExactSizeIterator`, so a reversed walk still yields exactly
+`height` rows / `pixel_count` pixels, including the degenerate
+`width == 0` frame where every row is the same empty slice (front and
+back are indistinguishable, so `rows().rev()` yields the same `height`
+empty rows as the forward walk). Eight new unit tests cover reversed
+order, both-ends meet-in-the-middle exhaustion, the full
+forward-vs-reversed mirror, in-place reversed row rewrites, and the
+zero-width contract per iterator. Pure API-completeness addition — no
+behaviour change to forward iteration, the parser, encoder, or
+streaming I/O.
+
 Round 11 added a raw-bytes pass-through pair on the streaming API —
 [`FarbfeldStreamReader::read_row_raw`] yields the next row's on-disk
 `width * 8` big-endian bytes verbatim into a caller `&mut [u8]` slot,

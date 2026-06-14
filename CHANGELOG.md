@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FarbfeldImage`'s three frame iterators — `Rows` (from `rows()`),
+  `RowsMut` (from `rows_mut()`), and `Pixels` (from `pixels()`) — now
+  implement `DoubleEndedIterator`, so callers can walk scan lines or
+  pixels back-to-front via `.rev()` or `.next_back()` (bottom-up row
+  traversal, vertical flips, meet-in-the-middle scans) without
+  re-indexing the flat `pixels` buffer by hand. The underlying
+  `slice::chunks_exact` / `chunks_exact_mut` already supported reverse
+  iteration; this surfaces it on the public iterator types. All three
+  remain `ExactSizeIterator`, so `.rev()` keeps yielding exactly
+  `height` rows / `pixel_count` pixels, including the degenerate
+  `width == 0` case where every row is the same empty slice (front and
+  back are indistinguishable, so reversed iteration yields the same
+  `height` empty rows as the forward walk). Eight new unit tests cover
+  reversed order, both-ends-meet-in-the-middle exhaustion, the full
+  forward-vs-reversed mirror, in-place reversed row rewrites, and the
+  zero-width row contract for each iterator. Pure API-completeness
+  addition — no behaviour change to existing forward iteration.
+
 ### Changed
 
 - `FarbfeldStreamReader::read_all_rows` now decodes each row straight

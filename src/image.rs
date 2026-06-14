@@ -336,6 +336,26 @@ impl<'a> Iterator for RowChunks<'a> {
     }
 }
 
+impl<'a> DoubleEndedIterator for RowChunks<'a> {
+    fn next_back(&mut self) -> Option<&'a [u16]> {
+        match self {
+            RowChunks::Sized(c) => c.next_back(),
+            // A zero-width frame's rows are all the same empty slice, so
+            // front and back are indistinguishable; just decrement the
+            // shared counter so `rows().rev()` yields the same `height`
+            // empty rows as the forward walk.
+            RowChunks::ZeroWidth { remaining } => {
+                if *remaining == 0 {
+                    None
+                } else {
+                    *remaining -= 1;
+                    Some(&[])
+                }
+            }
+        }
+    }
+}
+
 impl ExactSizeIterator for RowChunks<'_> {
     fn len(&self) -> usize {
         match self {
@@ -361,6 +381,12 @@ impl<'a> Iterator for Rows<'a> {
 
     fn size_hint(&self) -> (usize, Option<usize>) {
         self.inner.size_hint()
+    }
+}
+
+impl DoubleEndedIterator for Rows<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        self.inner.next_back()
     }
 }
 
@@ -397,6 +423,23 @@ impl<'a> Iterator for RowsMut<'a> {
     }
 }
 
+impl DoubleEndedIterator for RowsMut<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        // In the normal (`width > 0`) path `zero_width_remaining` is 0
+        // and `inner` does all the work. In the `width == 0` path
+        // `inner` is empty and every row is the same empty slice, so
+        // taking from the back is the same as taking from the front.
+        if let Some(back) = self.inner.next_back() {
+            return Some(back);
+        }
+        if self.zero_width_remaining > 0 {
+            self.zero_width_remaining -= 1;
+            return Some(&mut []);
+        }
+        None
+    }
+}
+
 impl ExactSizeIterator for RowsMut<'_> {
     fn len(&self) -> usize {
         self.inner.len() + self.zero_width_remaining
@@ -423,6 +466,15 @@ impl Iterator for Pixels<'_> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let n = self.inner.len();
         (n, Some(n))
+    }
+}
+
+impl DoubleEndedIterator for Pixels<'_> {
+    fn next_back(&mut self) -> Option<Self::Item> {
+        // Same `chunks_exact(4)` guarantee as `next`: every yielded
+        // chunk is exactly four samples, so the array conversion is
+        // infallible.
+        self.inner.next_back().map(|c| [c[0], c[1], c[2], c[3]])
     }
 }
 
@@ -729,5 +781,127 @@ mod tests {
                 assert_eq!(img.channel(x, y, 0), Some((y * 3 + x) as u16));
             }
         }
+    }
+
+    // ---- DoubleEndedIterator ----
+
+    #[test]
+    fn rows_iter_reversed_yields_scan_lines_bottom_up() {
+        let img = FarbfeldImage::new(
+            1,
+            3,
+            vec![
+                0x0001, 0, 0, 0xFFFF, // row 0
+                0x0002, 0, 0, 0xFFFF, // row 1
+                0x0003, 0, 0, 0xFFFF, // row 2
+            ],
+        )
+        .unwrap();
+        let bottom_up: Vec<&[u16]> = img.rows().rev().collect();
+        assert_eq!(bottom_up.len(), 3);
+        assert_eq!(bottom_up[0], &[0x0003, 0, 0, 0xFFFF]);
+        assert_eq!(bottom_up[1], &[0x0002, 0, 0, 0xFFFF]);
+        assert_eq!(bottom_up[2], &[0x0001, 0, 0, 0xFFFF]);
+        // Reversed sequence is the exact mirror of the forward one.
+        let mut forward: Vec<&[u16]> = img.rows().collect();
+        forward.reverse();
+        assert_eq!(forward, bottom_up);
+    }
+
+    #[test]
+    fn rows_iter_meets_in_the_middle_from_both_ends() {
+        // Distinct red value per row so front/back picks are unambiguous.
+        let img = FarbfeldImage::new(
+            1,
+            4,
+            vec![10, 0, 0, 1, 20, 0, 0, 1, 30, 0, 0, 1, 40, 0, 0, 1],
+        )
+        .unwrap();
+        let mut it = img.rows();
+        assert_eq!(it.next().unwrap()[0], 10); // front
+        assert_eq!(it.next_back().unwrap()[0], 40); // back
+        assert_eq!(it.next().unwrap()[0], 20); // front
+        assert_eq!(it.next_back().unwrap()[0], 30); // back
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn rows_iter_reversed_zero_width_yields_height_empty_rows() {
+        let img = FarbfeldImage::new(0, 3, vec![]).unwrap();
+        let collected: Vec<&[u16]> = img.rows().rev().collect();
+        assert_eq!(collected.len(), 3);
+        assert!(collected.iter().all(|r| r.is_empty()));
+    }
+
+    #[test]
+    fn rows_mut_reversed_rewrites_each_row_bottom_up() {
+        let mut img = FarbfeldImage::new(1, 3, vec![0u16; 3 * 4]).unwrap();
+        // Stamp each row with an ascending counter taken back-to-front,
+        // so the *last* row gets 1, the first row gets 3.
+        let mut tag = 0u16;
+        for r in img.rows_mut().rev() {
+            tag += 1;
+            for s in r.iter_mut() {
+                *s = tag;
+            }
+        }
+        assert_eq!(img.row(0).unwrap(), &[3u16; 4]);
+        assert_eq!(img.row(1).unwrap(), &[2u16; 4]);
+        assert_eq!(img.row(2).unwrap(), &[1u16; 4]);
+    }
+
+    #[test]
+    fn rows_mut_reversed_zero_width_yields_height_empty_rows() {
+        let mut img = FarbfeldImage::new(0, 4, vec![]).unwrap();
+        let mut count = 0;
+        for r in img.rows_mut().rev() {
+            assert!(r.is_empty());
+            count += 1;
+        }
+        assert_eq!(count, 4);
+    }
+
+    #[test]
+    fn pixels_iter_reversed_yields_pixels_last_to_first() {
+        let img = red_green_image(); // 2×1: red then green
+        let back_to_front: Vec<[u16; 4]> = img.pixels().rev().collect();
+        assert_eq!(
+            back_to_front,
+            vec![
+                [0x0000, 0xFFFF, 0x0000, 0xFFFF], // green (last)
+                [0xFFFF, 0x0000, 0x0000, 0xFFFF], // red (first)
+            ]
+        );
+    }
+
+    #[test]
+    fn pixels_iter_meets_in_the_middle_from_both_ends() {
+        // 4×1, channel-0 of each pixel = its scan index.
+        let img =
+            FarbfeldImage::new(4, 1, vec![0, 0, 0, 1, 1, 0, 0, 1, 2, 0, 0, 1, 3, 0, 0, 1]).unwrap();
+        let mut it = img.pixels();
+        assert_eq!(it.next().unwrap()[0], 0); // front
+        assert_eq!(it.next_back().unwrap()[0], 3); // back
+        assert_eq!(it.next().unwrap()[0], 1); // front
+        assert_eq!(it.next_back().unwrap()[0], 2); // back
+        assert_eq!(it.next(), None);
+        assert_eq!(it.next_back(), None);
+    }
+
+    #[test]
+    fn pixels_iter_reversed_is_full_mirror_of_forward() {
+        // Multi-row frame to confirm the reverse honours row-major order.
+        let mut pixels = vec![0u16; 3 * 2 * CHANNELS_PER_PIXEL];
+        for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+            p[0] = i as u16;
+        }
+        let img = FarbfeldImage::new(3, 2, pixels).unwrap();
+        let mut forward: Vec<[u16; 4]> = img.pixels().collect();
+        forward.reverse();
+        let reversed: Vec<[u16; 4]> = img.pixels().rev().collect();
+        assert_eq!(forward, reversed);
+        assert_eq!(reversed.first().unwrap()[0], 5); // last pixel first
+        assert_eq!(reversed.last().unwrap()[0], 0); // first pixel last
     }
 }
