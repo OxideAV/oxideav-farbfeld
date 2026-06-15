@@ -1,6 +1,6 @@
 //! Criterion micro-benchmarks for the farbfeld codec.
 //!
-//! Six bench groups exercise the public API across three image sizes —
+//! Eleven bench groups exercise the public API across three image sizes —
 //! `64×64` (16 KiB body), `256×256` (256 KiB body), `1024×1024` (4 MiB
 //! body) — so the suite captures both the per-call constant cost
 //! (header validation, allocation overhead) on the small fixture and the
@@ -40,6 +40,26 @@
 //!    but performs neither the per-sample BE → native decode nor the
 //!    verbatim byte copy into a caller slot, so this group is the
 //!    floor for how fast the reader can walk a body it doesn't keep.
+//! 10. `stream_skip_rows_bulk`  — `FarbfeldStreamReader::skip_rows(h)`
+//!     skipping the whole body in a single call. The per-row
+//!     `stream_skip_row` group above pays one `skip_row` call (plus its
+//!     bounds + accounting) per row; the bulk entry point folds the
+//!     height-bounded loop inside `skip_rows`, so this group isolates the
+//!     one-call cost of the public bulk-skip API a windowing caller
+//!     actually reaches for ("advance past the first N rows", "drop the
+//!     rest of this frame"). Same `Read::take` body-consume discipline,
+//!     measured against the same body so it's directly comparable to the
+//!     per-row group.
+//! 11. `peek_header`            — `peek_farbfeld_dimensions` on the
+//!     16-byte header prefix. Unlike every other group this path is
+//!     *body-independent*: it reads only the magic + the two big-endian
+//!     `u32` dimensions and validates `16 + width*height*8` fits in
+//!     `usize` via `total_len()`, never touching the pixel array. It is
+//!     the documented sandbox pre-flight — "reject an over-large image
+//!     before allocating its body" — so its cost is a per-call constant
+//!     that should stay flat as the announced dimensions grow. The group
+//!     runs the same three sizes purely to demonstrate that invariance
+//!     (the header bytes differ; the work does not).
 //!
 //! Run all of them with:
 //!
@@ -59,7 +79,8 @@ use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criteri
 
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    FarbfeldImage, FarbfeldStreamReader, FarbfeldStreamWriter,
+    peek_farbfeld_dimensions, FarbfeldImage, FarbfeldStreamReader, FarbfeldStreamWriter,
+    HEADER_LEN,
 };
 
 /// Image sizes covered by every group. The 4 MiB top end is large
@@ -345,6 +366,66 @@ fn bench_stream_skip_row(c: &mut Criterion) {
     g.finish();
 }
 
+fn bench_stream_skip_rows_bulk(c: &mut Criterion) {
+    let mut g = c.benchmark_group("stream_skip_rows_bulk");
+    for &(w, h) in SIZES {
+        let pixels = pattern_pixels(w, h);
+        let stream = pattern_full_stream(w, h, &pixels);
+        g.throughput(Throughput::Bytes(stream.len() as u64));
+        g.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &stream,
+            |b, s| {
+                b.iter(|| {
+                    let cursor = Cursor::new(black_box(s.as_slice()));
+                    let mut reader =
+                        FarbfeldStreamReader::new(cursor).expect("bulk-skip reader header parses");
+                    // Skip the entire body in one bulk call. `skip_rows`
+                    // caps at `rows_remaining` internally, so passing the
+                    // full height drains the whole body and any larger
+                    // value would behave identically.
+                    let skipped = reader
+                        .skip_rows(black_box(h))
+                        .expect("bulk-skip body well-formed");
+                    black_box(skipped);
+                });
+            },
+        );
+    }
+    g.finish();
+}
+
+fn bench_peek_header(c: &mut Criterion) {
+    let mut g = c.benchmark_group("peek_header");
+    for &(w, h) in SIZES {
+        let pixels = pattern_pixels(w, h);
+        let stream = pattern_full_stream(w, h, &pixels);
+        // Only the 16-byte header is needed; the body never participates.
+        // Throughput is fixed at the header length so the reported figure
+        // is per-call constant work, not a body-scaled rate.
+        let header: [u8; HEADER_LEN] = stream[..HEADER_LEN]
+            .try_into()
+            .expect("full stream carries a 16-byte header");
+        g.throughput(Throughput::Bytes(HEADER_LEN as u64));
+        g.bench_with_input(
+            BenchmarkId::from_parameter(format!("{w}x{h}")),
+            &header,
+            |b, hdr| {
+                b.iter(|| {
+                    let parsed =
+                        peek_farbfeld_dimensions(black_box(hdr)).expect("header peek well-formed");
+                    // Touch `total_len()` too — that's the actual
+                    // pre-flight gate (the announced full file size a
+                    // sandbox compares against its allocation budget).
+                    let total = parsed.total_len().expect("announced size fits usize");
+                    black_box(total);
+                });
+            },
+        );
+    }
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_whole,
@@ -356,5 +437,7 @@ criterion_group!(
     bench_stream_read_row_raw,
     bench_stream_write_row_raw,
     bench_stream_skip_row,
+    bench_stream_skip_rows_bulk,
+    bench_peek_header,
 );
 criterion_main!(benches);

@@ -48,10 +48,12 @@ Beyond the core codec the crate ships:
   spec-mandated invariants across six shape distributions plus four
   malformed-input scenarios, offline and reproducible from a printed
   seed.
-- **Benchmarks** — a Criterion suite (`benches/codec.rs`, see
-  `BENCHMARKS.md`) covers every public encode/parse entry point and the
-  streaming raw/skip paths across three image sizes. Run with
-  `cargo bench -p oxideav-farbfeld`.
+- **Benchmarks** — a Criterion suite of eleven groups (`benches/codec.rs`,
+  see `BENCHMARKS.md`) covers every public encode/parse entry point, the
+  streaming raw/skip paths (per-row and bulk `skip_rows`), and the
+  body-independent `peek_header` pre-flight, across three image sizes.
+  The `BENCHMARKS.md` baseline table is fully populated (every cell a
+  fresh point estimate). Run with `cargo bench -p oxideav-farbfeld`.
 
 ## Capability summary
 

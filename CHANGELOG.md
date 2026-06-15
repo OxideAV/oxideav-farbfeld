@@ -9,6 +9,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Two new Criterion benchmark groups in `benches/codec.rs`, bringing the
+  suite to eleven groups: `stream_skip_rows_bulk` exercises
+  `FarbfeldStreamReader::skip_rows(height)` (the whole body skipped in one
+  bulk call, the public counterpart to the per-row `stream_skip_row`
+  floor), and `peek_header` exercises `peek_farbfeld_dimensions` +
+  `total_len()` — the body-independent sandbox pre-flight that rejects an
+  over-large image before allocating its body. The baseline run confirms
+  `peek_header` is flat at ~1.6 ns per call across all three announced
+  sizes (its work never touches the pixel array) and that bulk
+  `skip_rows` edges out the per-row loop most at the small size
+  (~38.0 vs ~35.4 GiB/s at 64×64). `BENCHMARKS.md` was re-measured in a
+  single run: every cell of the baseline table is now a fresh point
+  estimate (the earlier carry-over figures and dashes are gone), and two
+  new explanatory sub-sections document the `peek_header` per-call-latency
+  reading and the bulk-skip comparison. Bench/doc-only — no `src/`
+  behaviour change.
 - `FarbfeldImage`'s three frame iterators — `Rows` (from `rows()`),
   `RowsMut` (from `rows_mut()`), and `Pixels` (from `pixels()`) — now
   implement `DoubleEndedIterator`, so callers can walk scan lines or
