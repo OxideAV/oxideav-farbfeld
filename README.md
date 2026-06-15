@@ -14,265 +14,46 @@ factual description of the byte layout
 
 ## Status
 
-Round 1 covered the entire spec — parser, encoder, and registry-side
-trait integration. Self-roundtrip and bit-exact byte compares against
-hand-built reference files are hard-asserted in `tests/`.
+Complete: the parser, encoder, container demux/mux, and registry-side
+trait integration cover the entire farbfeld spec. Self-roundtrip and
+bit-exact byte compares against hand-built reference files are
+hard-asserted in `tests/`, and a `magick` cross-validator round-trips
+through ImageMagick's farbfeld coder when the binary is present.
 
-Round 2 hardened the parser against a malicious 16-byte header
-announcing a multi-gigabyte body (the body length is now cross-checked
-*before* the pixel buffer allocation), added a row-at-a-time
-[`FarbfeldStreamReader`] / [`FarbfeldStreamWriter`] API that decodes /
-encodes without holding the whole image in memory, and added a
-`magick`-cross-validator integration test that round-trips through
-ImageMagick's farbfeld coder.
+Beyond the core codec the crate ships:
 
-Round 3 added a `cargo-fuzz` decode target (`fuzz/fuzz_targets/decode.rs`)
-that drives `parse_farbfeld`, `parse_farbfeld_header`, and the streaming
-reader against arbitrary bytes and cross-checks the decode → encode
-roundtrip. It surfaced three allocation/CPU DoS amplifications in
-`FarbfeldStreamReader`, all now fixed: the convenience `read_all_rows`
-drain pre-allocated the *announced* `width·height·4` samples, the
-constructor pre-allocated the *announced* `width·8` row buffer, and the
-zero-width case looped `height` (up to 2³²) empty iterations. Each is now
-bounded by the bytes actually delivered; regression tests live in
-`tests/dos_hardening.rs`.
+- **Streaming I/O** — `FarbfeldStreamReader` / `FarbfeldStreamWriter`
+  decode/encode one row at a time without holding the whole image in
+  memory. Both carry a raw-bytes pass-through pair (`read_row_raw` /
+  `write_row_raw`) that skips the per-sample big-endian swap, plus
+  `skip_row` / `skip_rows` for partial decode (thumbnail row, scan-line
+  inspection, "rows N..M of a multi-gigapixel stream"). Streaming and
+  whole-file output are byte-identical.
+- **DoS hardening** — every announced body length is cross-checked
+  against the bytes actually delivered *before* allocating, so a header
+  announcing a multi-gigabyte body that ships nothing fails on the first
+  short read having reserved nothing. A dimension-overflow sweep
+  (`tests/dimension_overflow.rs`) cross-checks `width*height*8` against a
+  `u128` oracle for 4096 PRNG `u32` pairs plus boundary points — no
+  panic, no silent wrap.
+- **Frame accessors** — random-access (`pixel` / `set_pixel` / `channel`
+  / `row` / `row_mut`) and sequential iterators (`rows` / `rows_mut` /
+  `pixels`), all `ExactSizeIterator` and `DoubleEndedIterator`, so a
+  caller can index by `(x, y)` or walk the frame (in either direction)
+  without re-implementing the `(y * width + x) * 4` row-major arithmetic.
+- **Fuzzing** — three `cargo-fuzz` targets (`decode`, `encode`,
+  `stream_io`) drive the whole-file paths and the streaming reader/writer
+  over a choppy `Read`/`Write` transport; no known crashes.
+- **Property sweep** — `tests/property_sweep.rs` asserts the eight
+  spec-mandated invariants across six shape distributions plus four
+  malformed-input scenarios, offline and reproducible from a printed
+  seed.
+- **Benchmarks** — a Criterion suite (`benches/codec.rs`, see
+  `BENCHMARKS.md`) covers every public encode/parse entry point and the
+  streaming raw/skip paths across three image sizes. Run with
+  `cargo bench -p oxideav-farbfeld`.
 
-Round 7 added a dimension-only peek convenience
-([`peek_farbfeld_dimensions`]) and a [`FarbfeldHeader::total_len`]
-method (= `16 + width * height * 8`) so sandboxes and pre-flight size
-checks can read the 16-byte header off a file (or its prefix) and
-refuse over-large images before allocating the body. The two surfaces
-are dogfooded by the whole-file decoder's existing announced-body
-cross-check. The round also realigned three internal module-doc
-citations from the upstream `farbfeld(5)` man page (project-shipped
-documentation, treated as link-only per this workspace's clean-room
-policy) to the workspace's own independent factual byte-layout
-description at `docs/image/farbfeld/farbfeld-format.md`.
-
-Round 8 added row-window decode primitives to the streaming reader —
-[`FarbfeldStreamReader::skip_row`] consumes exactly `width * 8` body
-bytes without performing the per-sample big-endian decode (advancing
-[`FarbfeldStreamReader::rows_read`] by one), and `skip_rows(n)` caps
-at the rows remaining instead of erroring past the end. The two are
-the symmetric counterpart to [`FarbfeldStreamReader::read_row`] for
-callers that only want rows N..M of a multi-gigapixel stream (thumbnail
-row, scan-line inspection, partial decode) and don't want to pay the
-conversion cost for rows they'll discard. Both inherit the same
-length-bounded `Read::take` discipline as `read_row`, so a malicious
-header announcing a multi-gigabyte row width but shipping no body still
-surfaces as a truncation error without forcing the announced-width
-allocation.
-
-Round 6 added the symmetric encode-side fuzz target
-(`fuzz/fuzz_targets/encode.rs`). The fuzz bytes are interpreted as
-`(width, height, body)` triples bounded to 64×64 (16 KiB body cap per
-execution, well inside libFuzzer's iteration budget) and every input
-drives all three whole-file encoder entry points (`encode_farbfeld`,
-`encode_farbfeld_from_rgba16`, `encode_farbfeld_image`) plus
-`FarbfeldStreamWriter` row-by-row. Six invariants are asserted on every
-input: no-panics, three-encoder agreement, streaming-writer-equals-
-whole-file agreement, lossless parse roundtrip, exact-size identity, and
-header echo. Each input also probes two rejection paths (one-byte-short
-and one-byte-long body lengths must reject; premature `finish` must
-reject). 601 312 executions / 61 s clean against the new corpus.
-
-Round 4 added a Criterion micro-benchmark suite (`benches/codec.rs`)
-covering both the in-memory and streaming codecs across three image
-sizes (64×64, 256×256, 1024×1024). Six bench groups exercise the six
-public encode/parse entry points so future changes can spot regressions
-on either path. Round 12 extended the suite with two more groups —
-`stream_read_row_raw` and `stream_write_row_raw` — that exercise the
-raw-bytes pass-through pair (`FarbfeldStreamReader::read_row_raw` /
-`FarbfeldStreamWriter::write_row_raw`) row-by-row across the same three
-sizes, guarding the round-11 perf claim that the raw path is faster
-than its native-endian sibling because it skips the per-sample BE swap.
-At 1024×1024 the raw read path measures ~36 GiB/s and the raw write
-path ~10 GiB/s on the bench host. Round 298 added a ninth group —
-`stream_skip_row` — exercising the row-window decode floor
-([`FarbfeldStreamReader::skip_row`] looped over the whole body: it
-consumes each row's bytes under the same bounded `Read::take` discipline
-as `read_row` but performs neither the per-sample big-endian decode nor
-the verbatim byte copy into a caller slot, so it's the fastest way to
-walk rows a partial decoder discards — thumbnail row, scan-line
-inspection, "rows N..M of a multi-gigapixel stream"). On the bench host
-it climbs from ~38.6 GiB/s at 64×64 to ~61.1 GiB/s at 256×256 to
-~67.8 GiB/s at 1024×1024 (the fixed header-parse cost amortised over a
-larger body), comfortably ahead of `stream_read_row_raw` which
-additionally copies each row out. The round also added a `BENCHMARKS.md`
-collecting the group descriptions and a regression baseline table in one
-place. Round 5 added a deterministic property-style sweep
-(`tests/property_sweep.rs`): 96 pseudo-random `(width, height, pixels)`
-triples per shape distribution × six distributions (tiny, square,
-tall-narrow, wide-short, zero-axis, medium) each assert the eight
-spec-mandated invariants — lossless roundtrip, exact size, header echo,
-encoder determinism, three-encoder-path agreement, streaming /
-whole-file agreement, idempotent re-encode, and peek / decode
-agreement. Four malformed-input scenarios (arbitrary bytes never panic,
-corrupted magic always rejected, trailing garbage always rejected,
-truncated body always rejected) run additional PRNG-driven sweeps.
-The sweep is offline / no-extra-dep (xorshift32 inlined) so any
-failure is reproducible from the seed printed in the assertion.
-
-Round 275 hardened the header size arithmetic with a dedicated
-dimension-overflow sweep (`tests/dimension_overflow.rs`). It drives a
-real 16-byte header carrying pathological `u32` dimensions (boundary
-points plus 4096 PRNG-driven pairs biased to the high `u32` band)
-through `parse_farbfeld_header` / `peek_farbfeld_dimensions` /
-[`FarbfeldHeader::total_len`] and cross-checks the announced
-`width * height * 8` body length against an independent `u128` oracle.
-Five invariants hold for every input: no panic on any `u32` pair;
-body-length exactness against the oracle when the product fits `usize`;
-overflow reported (never silently wrapped) when it doesn't; `total_len`
-either equals `16 + body_len` or rejects exactly when that sum overflows
-`usize`; and a header-only file announcing a multi-gigabyte body is
-rejected via the announced-vs-present cross-check without allocating the
-announced body. Pure test addition — no behaviour change.
-
-Round 289 sped up the streaming convenience drain
-([`FarbfeldStreamReader::read_all_rows`]) with a bit-identical change:
-each row is now decoded directly into the output `Vec`'s spare
-(uninitialised) capacity (`reserve` + `decode_be_samples` into
-`spare_capacity_mut` + `set_len`) instead of `resize(.., 0)`-ing the new
-tail to zero and immediately overwriting every slot. The per-row memset
-was redundant — the big-endian swap writes all `width * 4` new samples —
-so dropping it raised `stream_read_all_rows` throughput ~7.3 → ~8.8 GiB/s
-at 1024×1024 (~+20%), ~19.0 → ~25.2 GiB/s at 256×256 (~+32%), and
-~13.8 → ~15.5 GiB/s at 64×64 (~+12%) on the bench host. The DoS bound is
-unchanged: capacity still grows one delivered row at a time, so a header
-announcing a giant body that ships no bytes fails on the first short read
-having reserved nothing. A new unit test locks the output byte-identical
-to the whole-file `parse_farbfeld` decoder for both the fresh-reader and
-partial-`read_row`-drain growth paths.
-
-Round 13 added a small family of spatial accessors on
-[`FarbfeldImage`] — `pixel(x, y) -> Option<[u16; 4]>`,
-`set_pixel(x, y, [R, G, B, A])`, `channel(x, y, c) -> Option<u16>`,
-`row(y) -> Option<&[u16]>`, `row_mut(y) -> Option<&mut [u16]>`, and
-`pixel_count() -> usize` — that let callers index the decoded frame
-by `(x, y)` (or by single channel, or by whole scan-line) without
-re-implementing the `(y * width + x) * 4` row-major arithmetic at
-every call site. All accessors bounds-check against `width` /
-`height` (and the channel index against `4`) and return `Option`,
-so a caller looping over a fixed grid against a smaller frame can't
-accidentally panic. A new crate-level constant `CHANNELS_PER_PIXEL`
-(= `4`) is also exported so external offset arithmetic can name the
-channel count instead of hard-coding `4`. Fourteen unit tests cover
-the in-bounds reads/writes, out-of-bounds rejections, zero-width
-and zero-height edges, per-channel reads, single-row overwrite,
-and a row-major-layout consistency round-trip on a 3×2 image. Pure
-addition — no behaviour change to the parser, encoder, or
-streaming I/O.
-
-Round 14 added sequential iterator primitives on [`FarbfeldImage`] —
-`rows() -> Rows` (each scan line as `&[u16]`), `rows_mut() -> RowsMut`
-(each scan line as `&mut [u16]`), and `pixels() -> Pixels` (each pixel
-as an owned `[R, G, B, A]` quad). These are the sequential counterpart
-to the round-13 random-access accessors (`row` / `row_mut` / `pixel`):
-a caller walking the whole frame once no longer threads a `y` (or
-`(x, y)`) counter or re-unwraps `Option` per step. All three are built
-on `slice::chunks_exact` / `chunks_exact_mut` over `pixels`, so they are
-allocation-free, and all three are `ExactSizeIterator` (`rows` /
-`rows_mut` report `height`, `pixels` reports `pixel_count`). The
-degenerate `width == 0` frame is handled explicitly: `rows` /
-`rows_mut` still yield exactly `height` empty slices (matching `row`'s
-zero-width contract) rather than zero rows, since `chunks_exact`
-forbids a zero-length chunk. Thirteen unit tests cover ordered
-traversal, accessor agreement, exact-size accounting, the zero-width
-(height empty rows) and zero-height (no rows) edges, and one-pass
-mutable rewrite. The three iterator types (`Rows`, `RowsMut`,
-`Pixels`) are re-exported from the crate root. Pure addition — no
-behaviour change to the parser, encoder, or streaming I/O.
-
-Round 305 made all three round-14 iterators (`Rows`, `RowsMut`,
-`Pixels`) `DoubleEndedIterator`, so a caller can walk scan lines or
-pixels back-to-front with `.rev()` / `.next_back()` — bottom-up row
-traversal, vertical flips, or meeting in the middle from both ends —
-without manually re-indexing the flat `pixels` buffer. The underlying
-`slice::chunks_exact` / `chunks_exact_mut` already supported reverse
-iteration; this just surfaces it on the public iterator types. Each
-stays `ExactSizeIterator`, so a reversed walk still yields exactly
-`height` rows / `pixel_count` pixels, including the degenerate
-`width == 0` frame where every row is the same empty slice (front and
-back are indistinguishable, so `rows().rev()` yields the same `height`
-empty rows as the forward walk). Eight new unit tests cover reversed
-order, both-ends meet-in-the-middle exhaustion, the full
-forward-vs-reversed mirror, in-place reversed row rewrites, and the
-zero-width contract per iterator. Pure API-completeness addition — no
-behaviour change to forward iteration, the parser, encoder, or
-streaming I/O.
-
-Round 11 added a raw-bytes pass-through pair on the streaming API —
-[`FarbfeldStreamReader::read_row_raw`] yields the next row's on-disk
-`width * 8` big-endian bytes verbatim into a caller `&mut [u8]` slot,
-and [`FarbfeldStreamWriter::write_row_raw`] accepts an already-BE-encoded
-`width * 8`-byte row and forwards it to the underlying writer
-unchanged. Both methods share the same row-bytes pump, bounded
-`Read::take` / `Write::write_all` discipline, and row-count accounting
-as their native-endian counterparts ([`FarbfeldStreamReader::read_row`]
-/ [`FarbfeldStreamWriter::write_row`]), so a stream may mix the raw and
-native paths row-by-row in either direction. The reader's raw path is
-the symmetric counterpart to [`FarbfeldStreamReader::skip_row`] for
-callers that want the bytes *and* want them as bytes; the writer's raw
-path closes the loop for pipelines reading from one farbfeld source and
-forwarding the body to another consumer (proxies, hash-and-discard,
-re-muxing to another 16-bit-BE container) without paying the
-native-endian round-trip. Ten unit tests cover the new surfaces:
-read-side byte equality against the synthesised reference, mid-stream
-mixing with `read_row` and `skip_row`, zero-width and truncated-body
-edges, write-side byte equality against the reference, extra-row /
-wrong-length / zero-width / mixed-mode rejection, and an end-to-end
-`read_row_raw` → `write_row_raw` byte-identical passthrough.
-
-Round 10 added a third `cargo-fuzz` target
-(`fuzz/fuzz_targets/stream_io.rs`) that exercises `FarbfeldStreamReader`
-and `FarbfeldStreamWriter` through a chunked I/O transport
-(`ChoppyReader` / `ChoppyWriter`) whose `read` / `write` calls return
-short, mid-sized, or full-buffer chunks drawn from a deterministic
-xorshift32 schedule seeded by the fuzz input. The existing decode /
-encode targets drive their input through a bulk `Cursor` / byte slice,
-so neither exercises the streaming reader's bounded `Read::take` +
-`read_to_end` discipline or the streaming writer's `Write::write_all`
-discipline under choppy I/O — a genuinely different surface that fails
-silently if `write_all` stops looping on a short success or `Read::take`
-stops respecting its length cap. The target asserts five invariants on
-every input: no panics; chunked decode equals bulk `parse_farbfeld`
-decode; chunked encode equals bulk `encode_farbfeld_image` encode; the
-streaming roundtrip closes; and a `skip_row`-only walk covers `height`
-rows. A body-truncation rejection path is also probed on every non-
-empty body. 2 548 637 executions / 61 s clean against the new corpus
-(cov 382 ft 1396 corp 117), no panics, no truncation regressions.
-
-Round 9 hoisted the per-sample big-endian byte swap on the five
-non-memcpy hot paths into two shared internal helpers
-(`decode_be_samples` / `encode_be_samples`) that walk the input as
-`chunks_exact(2)` / `chunks_exact_mut(2)` in lockstep with the output,
-which the auto-vectoriser turns into a SIMD bswap. The whole-image
-encoder (`encode_farbfeld_image`) and the `[[u16; 4]]`-shaped
-convenience encoder (`encode_farbfeld_from_rgba16`) now also build
-their output into a pre-sized `Vec<u8>` and `copy_from_slice` the
-16-byte header in one store instead of three `extend_from_slice`
-calls, removing the four-times-per-pixel push that previously kept
-the loop scalar. The `[[u16; 4]] -> [u16]` cast that lets the
-convenience encoder share the same flat hot loop is a pure-Rust
-borrow-reinterpret (no extra crate dep, layout argument written out
-in the source), and the new shared helpers carry unit tests for the
-unit-length, long-run, empty, and asymmetric-input edges plus a
-parse/encode inversion check. Measured speedups on the
-1024×1024 release-build bench (4 MiB body, single sample,
-`cargo bench --bench codec -- --quick`):
-
-| Group at 1024×1024            | Throughput (4 MiB body)    |
-|-------------------------------|----------------------------|
-| `parse_whole`                 | ~39 GiB/s (was ~3.6 GiB/s) |
-| `encode_raw_be`               | ~78 GiB/s (memcpy-bound)   |
-| `encode_from_rgba16`          | ~47 GiB/s (was ~5.4 GiB/s) |
-| `encode_image`                | ~46 GiB/s (was ~4.7 GiB/s) |
-| `stream_read_all_rows`        | ~8.8 GiB/s (r289; was ~2.3 GiB/s) |
-| `stream_write_all_rows`       | ~10 GiB/s (was ~7.9 GiB/s) |
-
-Run with `cargo bench -p oxideav-farbfeld` (or
-`cargo bench -p oxideav-farbfeld -- parse_whole` to scope to one
-group).
+## Capability summary
 
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
@@ -323,13 +104,13 @@ assert_eq!(img.width, 1);
 assert_eq!(img.height, 1);
 assert_eq!(img.pixels, [0xFFFF, 0x0000, 0x0000, 0xFFFF]);
 
-// Spatial accessors (round 13) — index by (x, y) instead of
+// Spatial accessors — index by (x, y) instead of
 // reaching into `pixels` with manual `(y * w + x) * 4` arithmetic.
 assert_eq!(img.pixel(0, 0), Some([0xFFFF, 0x0000, 0x0000, 0xFFFF]));
 assert_eq!(img.channel(0, 0, 0), Some(0xFFFF)); // R
 assert_eq!(img.pixel(99, 99), None);            // out of bounds
 
-// Sequential iterators (round 14) — walk the whole frame once
+// Sequential iterators — walk the whole frame once
 // without threading a (x, y) counter. All three are ExactSizeIterator.
 assert_eq!(img.rows().len(), 1);
 let quads: Vec<[u16; 4]> = img.pixels().collect();
