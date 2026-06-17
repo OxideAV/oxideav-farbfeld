@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- `FarbfeldStreamReader::read_all_rows` now reserves the whole announced
+  body in a **single** allocation when it is within a fixed cap
+  (`ONE_SHOT_SAMPLE_CAP` = 64 Mi samples = 128 MiB), instead of growing
+  the output `Vec` one row at a time. The per-row growth left `Vec`'s
+  internal amortised doubling to memcpy the *entire* accumulated buffer at
+  each grow, and that repeated whole-buffer copy traffic dominated once the
+  body outgrew the warm cache — the documented `stream_read_all_rows`
+  throughput dip at 1024×1024. With the one-shot reservation the
+  `stream_read_all_rows` bench climbs from ~8.2 GiB/s to ~28.4 GiB/s at
+  1024×1024 (×2.9 / +202% on an Apple M4 Max), and the smaller sizes also
+  improve (~15.2→~23.0 GiB/s at 64×64, ~25.6→~29.2 GiB/s at 256×256); the
+  size curve is now flat instead of collapsing at the top end. A header
+  announcing a body **above** the cap still takes the incremental
+  row-by-row path, so the DoS bound is preserved unchanged: a 16-byte file
+  promising a multi-gigabyte body fails on the first short row read having
+  allocated only a single row, never the announced giant. Pure
+  perf/internals change — the decoded output is byte-identical to before
+  (locked by the existing
+  `read_all_rows_spare_capacity_decode_is_bit_identical_to_whole_file`
+  test) and a new
+  `read_all_rows_above_cap_announcement_with_no_body_fails_fast` regression
+  test pins the cap's incremental-fallback DoS contract. `BENCHMARKS.md`
+  baseline table + explanatory note updated.
+
 ### Added
 
 - Two new Criterion benchmark groups in `benches/codec.rs`, bringing the

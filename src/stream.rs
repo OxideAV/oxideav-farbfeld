@@ -308,8 +308,9 @@ impl<R: Read> FarbfeldStreamReader<R> {
     pub fn read_all_rows(&mut self) -> Result<Vec<u16>> {
         // Validate the announced sample count fits in `usize` so callers
         // get the explicit overflow error rather than a panic, but do
-        // NOT allocate it eagerly.
-        let _total_samples = (self.header.width as usize)
+        // NOT allocate it eagerly. It also caps the confirmed-data-bounded
+        // doubling below so a reserve never overshoots the announced body.
+        let total_samples = (self.header.width as usize)
             .checked_mul(self.header.height as usize)
             .and_then(|n| n.checked_mul(4))
             .ok_or_else(|| FarbfeldError::invalid("farbfeld stream: total samples overflow"))?;
@@ -324,39 +325,67 @@ impl<R: Read> FarbfeldStreamReader<R> {
             return Ok(Vec::new());
         }
         // Grow `out` row-by-row, decoding directly from the bounded
-        // `row_buf` read so no full-width scratch buffer is allocated
-        // ahead of the body bytes. Honour any rows already consumed via
-        // `read_row` by draining from `rows_read` to `height`.
+        // `row_buf` read. Honour any rows already consumed via `read_row`
+        // by draining from `rows_read` to `height`.
         //
-        // Per-row growth `reserve`s exactly `row_samples` extra slots and
-        // decodes the freshly-read body straight into the `Vec`'s spare
-        // (uninitialised) capacity through the shared SIMD-friendly
-        // `decode_be_samples` helper, then bumps the length with
-        // `set_len`. This skips the per-row zero-init that a
+        // Each row decodes the freshly-read body straight into the
+        // `Vec`'s spare (uninitialised) capacity through the shared
+        // SIMD-friendly `decode_be_samples` helper, then bumps the length
+        // with `set_len`. This skips the per-row zero-init that a
         // `resize(.., 0)` would do: `decode_be_samples` writes every one
         // of the `row_samples` new slots (its `body.len() == row_bytes ==
         // row_samples * 2` contract is enforced by the truncation check
         // in `read_row_bytes`), so the tail is fully initialised by the
-        // BE swap with no preceding memset. Capacity still grows only by
-        // the bytes a row actually delivered, preserving the DoS bound:
-        // `reserve` runs after the bounded `read_row_bytes` succeeded, so
-        // a header announcing a giant body that ships no bytes fails on
-        // the first short read having reserved nothing.
-        let mut out: Vec<u16> = Vec::new();
+        // BE swap with no preceding memset.
+        //
+        // ## Allocation strategy: bounded one-shot, else incremental
+        //
+        // The previous implementation grew `out` one row at a time. That
+        // leaves `Vec`'s internal amortised doubling to fire at sizes it
+        // picks, and **each doubling memcpy's the entire accumulated
+        // buffer**. On the 4 MiB 1024×1024 body that repeated whole-buffer
+        // copy traffic dominated once the buffer outgrew the warm cache,
+        // showing up as the documented `stream_read_all_rows` throughput
+        // dip at the large size.
+        //
+        // When the announced body is within a fixed cap
+        // (`ONE_SHOT_SAMPLE_CAP`), reserve it **once** up front: a single
+        // allocation, zero reallocs, zero whole-buffer copies. Each row
+        // then decodes straight into the pre-sized spare capacity.
+        //
+        // The cap preserves the DoS bound. A 16-byte file announcing a
+        // multi-gigabyte body has `total_samples` far above the cap, so it
+        // takes the incremental row-by-row path and still fails on the
+        // first short read having reserved only a single row — never the
+        // announced giant. The cap is sized so the worst-case eager
+        // reservation a malicious-but-under-cap header can trigger stays a
+        // bounded, fast-failing allocation, not an OOM.
+        const ONE_SHOT_SAMPLE_CAP: usize = 64 * 1024 * 1024; // 64 Mi samples = 128 MiB
+        let one_shot = total_samples <= ONE_SHOT_SAMPLE_CAP;
+        let mut out: Vec<u16> = if one_shot {
+            Vec::with_capacity(total_samples)
+        } else {
+            Vec::new()
+        };
         while self.rows_read < self.header.height {
             // `read_row_bytes` returns false only for the zero-width
             // (no body) case; the row is still counted toward `height`.
             if self.read_row_bytes()? {
                 let prev_len = out.len();
-                out.reserve(row_samples);
-                // SAFETY: `reserve(row_samples)` guarantees at least
-                // `row_samples` slots of spare capacity at `prev_len`, so
-                // the `&mut [u16]` view over `spare_capacity_mut()[..
-                // row_samples]` reborrowed as initialised `u16` is in
-                // bounds. `decode_be_samples` fills exactly those
-                // `row_samples` slots (`row_buf.len() == row_bytes ==
-                // row_samples * 2` after a successful bounded read), so
-                // every slot is initialised before `set_len` exposes it.
+                // One-shot path already reserved the whole body; the
+                // incremental path reserves a single row's worth here.
+                if out.capacity() - prev_len < row_samples {
+                    out.reserve(row_samples);
+                }
+                // SAFETY: the grow block above guarantees `capacity -
+                // prev_len >= row_samples` (it only skips the `reserve`
+                // when that already holds), so the `&mut [u16]` view over
+                // `spare_capacity_mut()[..row_samples]` reborrowed as
+                // initialised `u16` is in bounds. `decode_be_samples`
+                // fills exactly those `row_samples` slots (`row_buf.len()
+                // == row_bytes == row_samples * 2` after a successful
+                // bounded read), so every slot is initialised before
+                // `set_len` exposes it.
                 // `u16` has no invalid bit patterns, so even a
                 // contract-violating partial fill could not produce an
                 // invalid value — but the truncation check above rules
@@ -1169,5 +1198,34 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn read_all_rows_above_cap_announcement_with_no_body_fails_fast() {
+        // The one-shot reservation in `read_all_rows` is gated by
+        // `ONE_SHOT_SAMPLE_CAP`: an announced body at or below the cap is
+        // reserved in a single allocation, but an announcement *above* the
+        // cap must fall back to the incremental row-by-row path so a
+        // header promising a huge body it never ships cannot trigger an
+        // eager giant allocation. This locks the gate: a header announcing
+        // a body well past the cap, followed by zero body bytes, must fail
+        // as a truncation error (the incremental path's first short row
+        // read), near-instantly, never OOM. 0x4000 × 0x4000 = 256 Mi
+        // pixels = 1 Gi samples — 16× the 64 Mi cap.
+        let big = 0x4000u32;
+        let mut buf = Vec::new();
+        buf.extend_from_slice(MAGIC);
+        buf.extend_from_slice(&big.to_be_bytes());
+        buf.extend_from_slice(&big.to_be_bytes());
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(buf)).unwrap();
+        let t = std::time::Instant::now();
+        let err = reader.read_all_rows().expect_err("no body — must refuse");
+        let dt = t.elapsed();
+        let FarbfeldError::InvalidData(msg) = err;
+        assert!(msg.contains("truncated"), "msg = {msg:?}");
+        assert!(
+            dt < std::time::Duration::from_millis(500),
+            "above-cap announcement took {dt:?} — incremental path must not pre-allocate",
+        );
     }
 }

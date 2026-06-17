@@ -49,7 +49,7 @@ exception — see the note below the table).
 | `encode_raw_be`        | ~24.4 GiB/s  | ~50.3 GiB/s  | ~55.8 GiB/s   |
 | `encode_from_rgba16`   | ~20.5 GiB/s  | ~47.4 GiB/s  | ~42.8 GiB/s   |
 | `encode_image`         | ~18.2 GiB/s  | ~48.9 GiB/s  | ~50.1 GiB/s   |
-| `stream_read_all_rows` | ~15.2 GiB/s  | ~25.6 GiB/s  | ~8.2 GiB/s    |
+| `stream_read_all_rows` | ~23.0 GiB/s  | ~29.2 GiB/s  | ~28.4 GiB/s   |
 | `stream_write_all_rows`| ~12.2 GiB/s  | ~27.3 GiB/s  | ~16.2 GiB/s   |
 | `stream_read_row_raw`  | ~25.5 GiB/s  | ~35.9 GiB/s  | ~34.6 GiB/s   |
 | `stream_write_row_raw` | ~15.7 GiB/s  | ~35.2 GiB/s  | ~18.3 GiB/s   |
@@ -60,11 +60,21 @@ exception — see the note below the table).
 The whole table was re-measured in a single run; every cell is a fresh
 point estimate (no carry-over figures, no dashes). `parse_whole` /
 `encode_*` headline GiB/s replaces the earlier round-9 carry-over numbers.
-`stream_read_all_rows` dips at 1024×1024 because that group grows the
-output `Vec` across the full 4 MiB body and the realloc/copy traffic
-dominates once the body no longer fits a warm cache; the row-at-a-time
-`stream_read_row_raw` and `stream_skip_row` groups, which reuse one row
-buffer, keep climbing instead.
+
+`stream_read_all_rows` previously **dipped** at 1024×1024 (~8.2 GiB/s)
+because the group grew the output `Vec` one row at a time, leaving `Vec`'s
+internal amortised doubling to memcpy the entire accumulated buffer at each
+grow — traffic that dominated once the 4 MiB body outgrew the warm cache.
+Round 328 reserves the whole announced body in a single allocation when it
+is within a fixed cap (`ONE_SHOT_SAMPLE_CAP` = 64 Mi samples = 128 MiB),
+eliminating the repeated whole-buffer copies. The 1024×1024 figure now
+climbs to ~28.4 GiB/s (×2.9 vs the old dip) and the size curve is flat
+across all three sizes instead of collapsing at the top end. A header
+announcing a body **above** the cap still takes the incremental row-by-row
+path, so the DoS bound (a 16-byte file promising a multi-gigabyte body
+fails on the first short row read having allocated only one row) is
+preserved — see the `read_all_rows_above_cap_announcement_with_no_body_fails_fast`
+regression test.
 
 ### Reading the `peek_header` row
 
