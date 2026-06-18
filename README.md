@@ -27,8 +27,11 @@ Beyond the core codec the crate ships:
   memory. Both carry a raw-bytes pass-through pair (`read_row_raw` /
   `write_row_raw`) that skips the per-sample big-endian swap, plus
   `skip_row` / `skip_rows` for partial decode (thumbnail row, scan-line
-  inspection, "rows N..M of a multi-gigapixel stream"). Streaming and
-  whole-file output are byte-identical.
+  inspection, "rows N..M of a multi-gigapixel stream"). Bulk convenience
+  on both ends: `read_all_rows` drains the whole body in one call, and
+  `write_all_rows` / `write_all_rows_raw` emit a whole flat plane (native
+  or pre-serialised big-endian) in one call instead of a hand-written
+  per-row loop. Streaming and whole-file output are byte-identical.
 - **DoS hardening** — every announced body length is cross-checked
   against the bytes actually delivered *before* allocating, so a header
   announcing a multi-gigabyte body that ships nothing fails on the first
@@ -60,9 +63,9 @@ Beyond the core codec the crate ships:
 | Capability                      | Status                            |
 |---------------------------------|-----------------------------------|
 | Parse (whole-file)              | full                              |
-| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader` (incl. `read_row_raw` / `skip_row` / `skip_rows`) |
+| Parse (streaming, row-at-a-time)| full — `FarbfeldStreamReader` (incl. `read_row_raw` / `skip_row` / `skip_rows` / bulk `read_all_rows`) |
 | Encode (whole-file)             | full                              |
-| Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter` (incl. `write_row_raw`) |
+| Encode (streaming, row-at-a-time)| full — `FarbfeldStreamWriter` (incl. `write_row_raw` / bulk `write_all_rows` / `write_all_rows_raw`) |
 | Round-trip (self)               | exact                             |
 | Round-trip (vs `magick`)        | exact (bit-identical, when present)|
 | Container demux                 | full                              |

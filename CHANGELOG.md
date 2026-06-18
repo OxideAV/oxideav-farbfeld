@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `FarbfeldStreamWriter::write_all_rows(samples)` and
+  `write_all_rows_raw(body)`: bulk-convenience encode entry points that
+  round out the streaming API's symmetry with
+  `FarbfeldStreamReader::read_all_rows`. Instead of hand-looping
+  `write_row` / `write_row_raw` once per scan line, a caller hands the
+  whole remaining plane in a single call — `write_all_rows` takes the
+  flat native-endian `rows_remaining * width * 4`-sample plane and runs
+  each row through the same per-row big-endian encode path; the `_raw`
+  sibling takes the pre-serialised `rows_remaining * width * 8`-byte
+  on-disk body and forwards it verbatim. Both consume the writer and
+  return the surrendered `W` via the same `finish` completeness check, so
+  the output is a complete, well-formed farbfeld stream byte-identical to
+  the equivalent per-row loop. Both honour rows already emitted (so a
+  caller can write a header row by hand, then bulk-write the rest) and
+  handle the zero-width / zero-height degenerate shapes (header-only
+  output). Seven unit tests cover byte-exactness vs the per-row loop and
+  the synthesised reference, the rows-already-written split, wrong-plane-
+  length rejection (native + raw), the zero-axis edges, and an end-to-end
+  `read_all_rows` → `write_all_rows` byte-identical round-trip. Pure
+  API-completeness addition — no behaviour change to existing methods, no
+  new dependencies, both feature modes build and test clean.
+
 ### Changed
 
 - `FarbfeldStreamReader::read_all_rows` now reserves the whole announced

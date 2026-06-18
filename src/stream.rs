@@ -553,6 +553,100 @@ impl<W: Write> FarbfeldStreamWriter<W> {
         Ok(())
     }
 
+    /// Append every remaining body row from a single flat native-endian
+    /// sample plane, then return the wrapped writer.
+    ///
+    /// This is the bulk-convenience counterpart to
+    /// [`FarbfeldStreamReader::read_all_rows`] on the writer side: instead
+    /// of the caller hand-looping [`write_row`](Self::write_row) once per
+    /// scan line, hand the whole remaining plane in one call. `samples`
+    /// must hold exactly `rows_remaining * width * 4` native-endian
+    /// `u16` values — the rows still pending after any rows already
+    /// emitted via [`write_row`](Self::write_row) /
+    /// [`write_row_raw`](Self::write_row_raw) — laid out row-major in
+    /// `R, G, B, A` order. Each row is split off and forwarded through the
+    /// same per-row big-endian encode path [`write_row`](Self::write_row)
+    /// uses, so the emitted bytes are identical to the equivalent
+    /// row-by-row loop.
+    ///
+    /// On success the writer has emitted all `height` rows and is
+    /// surrendered via the same [`finish`](Self::finish) check, so the
+    /// returned `W` carries a complete, well-formed farbfeld stream.
+    ///
+    /// Returns [`FarbfeldError::InvalidData`] if `samples.len()` is not
+    /// exactly `rows_remaining * width * 4`, or if the underlying writer
+    /// fails mid-plane.
+    pub fn write_all_rows(mut self, samples: &[u16]) -> Result<W> {
+        let rows_remaining = self.height - self.rows_written;
+        let row_samples = (self.width as usize) * 4;
+        let want = (rows_remaining as usize) * row_samples;
+        if samples.len() != want {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: write_all_rows plane has {} samples, need {want} ({rows_remaining} rows × {} × 4)",
+                samples.len(),
+                self.width,
+            )));
+        }
+        // Zero-width images carry no body bytes whatever the height, so
+        // each `write_row` call below is a no-op pump that only advances
+        // the row count — split on a non-zero stride and loop the rows.
+        if row_samples == 0 {
+            for _ in 0..rows_remaining {
+                self.write_row(&[])?;
+            }
+        } else {
+            for row in samples.chunks_exact(row_samples) {
+                self.write_row(row)?;
+            }
+        }
+        self.finish()
+    }
+
+    /// Append every remaining body row from a single flat plane of
+    /// pre-serialised big-endian on-disk bytes, then return the wrapped
+    /// writer.
+    ///
+    /// The raw-bytes counterpart to [`write_all_rows`](Self::write_all_rows),
+    /// and the bulk counterpart to
+    /// [`write_row_raw`](Self::write_row_raw): `body` must hold exactly
+    /// `rows_remaining * width * 8` bytes — four big-endian 16-bit
+    /// channels per pixel, already in on-disk order — and the bytes are
+    /// forwarded verbatim without the per-sample native-endian → big-
+    /// endian conversion [`write_all_rows`](Self::write_all_rows) performs.
+    /// This is the bulk shape a forwarder / proxy that has already drained
+    /// a whole farbfeld body via
+    /// [`FarbfeldStreamReader::read_all_rows`]'s raw sibling (or holds the
+    /// on-disk body verbatim) reaches for.
+    ///
+    /// On success all `height` rows are emitted and the writer is
+    /// surrendered via [`finish`](Self::finish).
+    ///
+    /// Returns [`FarbfeldError::InvalidData`] if `body.len()` is not
+    /// exactly `rows_remaining * width * 8`, or if the underlying writer
+    /// fails mid-plane.
+    pub fn write_all_rows_raw(mut self, body: &[u8]) -> Result<W> {
+        let rows_remaining = self.height - self.rows_written;
+        let row_bytes = self.row_buf.len();
+        let want = (rows_remaining as usize) * row_bytes;
+        if body.len() != want {
+            return Err(FarbfeldError::invalid(format!(
+                "farbfeld stream: write_all_rows_raw plane has {} bytes, need {want} ({rows_remaining} rows × {} × {BYTES_PER_PIXEL})",
+                body.len(),
+                self.width,
+            )));
+        }
+        if row_bytes == 0 {
+            for _ in 0..rows_remaining {
+                self.write_row_raw(&[])?;
+            }
+        } else {
+            for row in body.chunks_exact(row_bytes) {
+                self.write_row_raw(row)?;
+            }
+        }
+        self.finish()
+    }
+
     /// Confirm exactly `height` rows were written and surrender the
     /// underlying writer.
     ///
@@ -736,6 +830,149 @@ mod tests {
         let mut writer = FarbfeldStreamWriter::new(Vec::new(), 3, 1).unwrap();
         let too_short = [0u16; 8]; // need 12.
         assert!(writer.write_row(&too_short).is_err());
+    }
+
+    #[test]
+    fn write_all_rows_byte_exact_against_per_row_loop() {
+        // The bulk `write_all_rows` must emit the exact same byte stream
+        // as the equivalent per-row `write_row` loop (which itself is
+        // already locked byte-exact against the synthesised reference).
+        let w = 5u32;
+        let h = 7u32;
+        let mut samples = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * w + x) as u16;
+                samples.push(v.wrapping_mul(0x0123));
+                samples.push(v.wrapping_mul(0x4567));
+                samples.push(v.wrapping_mul(0x89AB));
+                samples.push(v.wrapping_mul(0xCDEF));
+            }
+        }
+        let reference = synth(w, h, &samples);
+
+        // Per-row loop.
+        let mut loop_writer = FarbfeldStreamWriter::new(Vec::new(), w, h).unwrap();
+        for row in samples.chunks_exact((w as usize) * 4) {
+            loop_writer.write_row(row).unwrap();
+        }
+        let loop_bytes = loop_writer.finish().unwrap();
+        assert_eq!(loop_bytes, reference);
+
+        // Bulk path.
+        let bulk_writer = FarbfeldStreamWriter::new(Vec::new(), w, h).unwrap();
+        let bulk_bytes = bulk_writer.write_all_rows(&samples).unwrap();
+        assert_eq!(bulk_bytes, reference);
+    }
+
+    #[test]
+    fn write_all_rows_honours_rows_already_written() {
+        // Write the first row by hand, then hand the remaining rows to
+        // the bulk path; the result must still be the full reference.
+        let w = 3u32;
+        let h = 4u32;
+        let mut samples = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * w + x) as u16;
+                samples.push(v.wrapping_mul(0x1111));
+                samples.push(v.wrapping_mul(0x2222));
+                samples.push(v.wrapping_mul(0x3333));
+                samples.push(v.wrapping_mul(0x4444));
+            }
+        }
+        let reference = synth(w, h, &samples);
+        let row_samples = (w as usize) * 4;
+
+        let mut writer = FarbfeldStreamWriter::new(Vec::new(), w, h).unwrap();
+        writer.write_row(&samples[..row_samples]).unwrap();
+        // Hand it only the remaining 3 rows.
+        let bytes = writer.write_all_rows(&samples[row_samples..]).unwrap();
+        assert_eq!(bytes, reference);
+    }
+
+    #[test]
+    fn write_all_rows_rejects_wrong_plane_length() {
+        // 2×3 needs 24 samples; pass 20.
+        let writer = FarbfeldStreamWriter::new(Vec::new(), 2, 3).unwrap();
+        let too_short = vec![0u16; 20];
+        let err = writer.write_all_rows(&too_short).unwrap_err();
+        let FarbfeldError::InvalidData(s) = err;
+        assert!(s.contains("need 24"), "msg = {s:?}");
+    }
+
+    #[test]
+    fn write_all_rows_handles_zero_width_and_zero_height() {
+        // 0×3 — three empty rows, header-only output.
+        let writer = FarbfeldStreamWriter::new(Vec::new(), 0, 3).unwrap();
+        let bytes = writer.write_all_rows(&[]).unwrap();
+        assert_eq!(bytes.len(), HEADER_LEN);
+        assert_eq!(&bytes[12..16], &[0, 0, 0, 3]);
+
+        // 5×0 — zero height, no rows, also header-only.
+        let writer = FarbfeldStreamWriter::new(Vec::new(), 5, 0).unwrap();
+        let bytes = writer.write_all_rows(&[]).unwrap();
+        assert_eq!(bytes.len(), HEADER_LEN);
+        assert_eq!(&bytes[8..12], &[0, 0, 0, 5]);
+    }
+
+    #[test]
+    fn write_all_rows_raw_byte_exact_against_reference() {
+        // Bulk raw path forwards a whole pre-serialised BE body verbatim.
+        let w = 4u32;
+        let h = 6u32;
+        let mut samples = Vec::new();
+        for y in 0..h {
+            for x in 0..w {
+                let v = (y * w + x) as u16;
+                samples.push(v.wrapping_mul(0x1357));
+                samples.push(v.wrapping_mul(0x2468));
+                samples.push(v.wrapping_mul(0xACE0));
+                samples.push(v.wrapping_mul(0xBDF1));
+            }
+        }
+        let reference = synth(w, h, &samples);
+        let body = &reference[HEADER_LEN..];
+
+        let writer = FarbfeldStreamWriter::new(Vec::new(), w, h).unwrap();
+        let bytes = writer.write_all_rows_raw(body).unwrap();
+        assert_eq!(bytes, reference);
+    }
+
+    #[test]
+    fn write_all_rows_raw_rejects_wrong_plane_length() {
+        // 3×2 needs 48 bytes; pass 40.
+        let writer = FarbfeldStreamWriter::new(Vec::new(), 3, 2).unwrap();
+        let too_short = vec![0u8; 40];
+        let err = writer.write_all_rows_raw(&too_short).unwrap_err();
+        let FarbfeldError::InvalidData(s) = err;
+        assert!(s.contains("need 48"), "msg = {s:?}");
+    }
+
+    #[test]
+    fn read_all_rows_into_write_all_rows_round_trips() {
+        // End-to-end: drain a whole stream via `read_all_rows`, then
+        // re-emit it via the bulk `write_all_rows`; the output must equal
+        // the input byte-for-byte. This is the bulk-symmetry counterpart
+        // to the per-row passthrough test.
+        let mut samples = Vec::new();
+        for y in 0..9u32 {
+            for x in 0..6u32 {
+                let v = (y * 6 + x) as u16;
+                samples.push(v.wrapping_mul(0x0123).wrapping_add(0xBEEF));
+                samples.push(v.wrapping_mul(0x4567));
+                samples.push(v.wrapping_mul(0x89AB).wrapping_add(0x0F0F));
+                samples.push(v.wrapping_mul(0xCDEF));
+            }
+        }
+        let reference = synth(6, 9, &samples);
+
+        let mut reader = FarbfeldStreamReader::new(Cursor::new(reference.clone())).unwrap();
+        let drained = reader.read_all_rows().unwrap();
+
+        let writer = FarbfeldStreamWriter::new(Vec::new(), 6, 9).unwrap();
+        let re_emitted = writer.write_all_rows(&drained).unwrap();
+        assert_eq!(re_emitted, reference);
     }
 
     #[test]
