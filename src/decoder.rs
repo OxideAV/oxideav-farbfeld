@@ -79,4 +79,20 @@ impl Decoder for FarbfeldDecoder {
         self.eof = true;
         Ok(())
     }
+
+    /// Clear all carry-over state so the decoder can resume from a new
+    /// stream position after a container seek.
+    ///
+    /// The trait's default `reset` is "flush-then-drain", but our
+    /// `flush` latches `eof = true` — so the default would leave the
+    /// decoder permanently end-of-stream, returning `Eof` on the next
+    /// `receive_frame` instead of `NeedMore`. Override it to drop any
+    /// buffered frame and clear the eof latch, restoring the
+    /// freshly-constructed state (codec id untouched) so the next
+    /// `send_packet` decodes as if it were the first.
+    fn reset(&mut self) -> oxideav_core::Result<()> {
+        self.pending = None;
+        self.eof = false;
+        Ok(())
+    }
 }

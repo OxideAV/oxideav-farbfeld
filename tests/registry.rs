@@ -211,6 +211,65 @@ fn encoder_decoder_full_roundtrip_is_byte_exact_across_sizes() {
 }
 
 #[test]
+fn decoder_reset_clears_eof_latch_and_pending_for_reuse() {
+    // Decode a frame, flush (latches eof), then reset and decode a fresh
+    // packet. The trait's default flush-then-drain reset would leave the
+    // decoder permanently eof; our override must restore NeedMore /
+    // reusable state.
+    let bytes = build_reference(2, 2);
+    let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    params.width = Some(2);
+    params.height = Some(2);
+    let mut dec = make_decoder(&params).unwrap();
+
+    let mut pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), bytes.clone());
+    pkt.flags.keyframe = true;
+    dec.send_packet(&pkt).unwrap();
+    let _ = dec.receive_frame().unwrap();
+    dec.flush().unwrap();
+    // After flush with nothing pending, receive_frame reports end-of-stream.
+    assert!(matches!(dec.receive_frame(), Err(oxideav_core::Error::Eof)));
+
+    // Reset must clear the eof latch: with nothing buffered, the decoder
+    // now asks for more input instead of reporting eof.
+    dec.reset().unwrap();
+    assert!(matches!(
+        dec.receive_frame(),
+        Err(oxideav_core::Error::NeedMore)
+    ));
+
+    // And the decoder is fully reusable: a fresh packet decodes cleanly.
+    dec.send_packet(&pkt).unwrap();
+    let frame = dec.receive_frame().unwrap();
+    let vf = match frame {
+        Frame::Video(v) => v,
+        _ => panic!("expected video frame"),
+    };
+    assert_eq!(vf.planes[0].data.len(), 2 * 2 * 8);
+}
+
+#[test]
+fn decoder_reset_drops_a_buffered_frame() {
+    // A frame decoded but not yet received must be discarded by reset
+    // (a seek invalidates it), so the post-reset receive_frame asks for
+    // a new packet rather than handing back the stale frame.
+    let bytes = build_reference(1, 1);
+    let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    params.width = Some(1);
+    params.height = Some(1);
+    let mut dec = make_decoder(&params).unwrap();
+    let mut pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), bytes);
+    pkt.flags.keyframe = true;
+    dec.send_packet(&pkt).unwrap();
+    // Do NOT receive the frame; reset should drop it.
+    dec.reset().unwrap();
+    assert!(matches!(
+        dec.receive_frame(),
+        Err(oxideav_core::Error::NeedMore)
+    ));
+}
+
+#[test]
 fn demuxer_publishes_correct_stream_info() {
     let bytes = build_reference(5, 7);
     let cursor: Box<dyn oxideav_core::ReadSeek> = Box::new(Cursor::new(bytes));
