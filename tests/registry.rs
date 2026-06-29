@@ -158,6 +158,59 @@ fn encoder_handles_padded_stride() {
 }
 
 #[test]
+fn encoder_rejects_plane_too_short_for_declared_dimensions() {
+    // 2×2 needs 4 full rows of 16 bytes = 64 bytes of samples; hand the
+    // encoder a plane that's one byte short. The encoder must return an
+    // InvalidData error rather than panic on an out-of-range row slice.
+    let width = 2u32;
+    let height = 2u32;
+    let row_bytes = (width as usize) * 8;
+    let stride = row_bytes;
+    let data = vec![0u8; stride * height as usize - 1]; // one byte short
+    let frame = Frame::Video(VideoFrame {
+        pts: None,
+        planes: vec![VideoPlane { stride, data }],
+    });
+    let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+    params.width = Some(width);
+    params.height = Some(height);
+    params.pixel_format = Some(PixelFormat::Rgba64Le);
+
+    let mut enc = make_encoder(&params).unwrap();
+    let err = enc.send_frame(&frame).unwrap_err();
+    let msg = format!("{err}");
+    assert!(
+        msg.contains("too short"),
+        "expected short-plane rejection, got: {msg}"
+    );
+}
+
+#[test]
+fn encoder_decoder_full_roundtrip_is_byte_exact_across_sizes() {
+    // Drive several shapes (incl. a tall 1×N and a wide N×1) through the
+    // decode -> encode trait path and confirm the emitted bytes equal
+    // the synthesised reference exactly — pins the one-pass LE->BE
+    // encoder swap against the parser's BE->native decode.
+    for (w, h) in [(1u32, 1u32), (1, 17), (17, 1), (5, 7), (16, 16), (0, 0)] {
+        let reference = build_reference(w, h);
+        let mut params = CodecParameters::video(CodecId::new(CODEC_ID_STR));
+        params.width = Some(w);
+        params.height = Some(h);
+        let mut dec = make_decoder(&params).unwrap();
+        let mut pkt = oxideav_core::Packet::new(0, TimeBase::new(1, 1), reference.clone());
+        pkt.flags.keyframe = true;
+        dec.send_packet(&pkt).unwrap();
+        let frame = dec.receive_frame().unwrap();
+
+        params.pixel_format = Some(PixelFormat::Rgba64Le);
+        let mut enc = make_encoder(&params).unwrap();
+        enc.send_frame(&frame).unwrap();
+        let out = enc.receive_packet().unwrap();
+        assert_eq!(out.data, reference, "byte-exact roundtrip for {w}×{h}");
+    }
+}
+
+#[test]
 fn demuxer_publishes_correct_stream_info() {
     let bytes = build_reference(5, 7);
     let cursor: Box<dyn oxideav_core::ReadSeek> = Box::new(Cursor::new(bytes));

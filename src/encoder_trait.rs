@@ -4,8 +4,8 @@
 //! [`oxideav_core::PixelFormat::Rgba64Le`] video frame per `send_frame`
 //! call and emits one complete farbfeld file as a packet.
 
-use crate::encoder::encode_farbfeld;
-use crate::parser::BYTES_PER_PIXEL;
+use crate::encoder::swap_pairs_le_to_be;
+use crate::parser::{BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
 
 use oxideav_core::Encoder;
 use oxideav_core::{CodecId, CodecParameters, Frame, Packet, PixelFormat, TimeBase};
@@ -63,8 +63,9 @@ impl Encoder for FarbfeldEncoder {
 
         // Caller hands us little-endian 16-bit RGBA — convert each
         // sample to big-endian for the on-disk body. Plane stride may
-        // exceed `width * 8` (e.g. arena-aligned plane); copy
-        // `width * 8` bytes per row to skip the trailing pad.
+        // exceed `width * 8` (e.g. arena-aligned plane); only the first
+        // `width * 8` bytes of each row carry samples, the rest is pad
+        // that must never reach disk.
         let row_bytes = (width as usize)
             .checked_mul(BYTES_PER_PIXEL)
             .ok_or_else(|| oxideav_core::Error::invalid("farbfeld encoder: row size overflow"))?;
@@ -77,18 +78,43 @@ impl Encoder for FarbfeldEncoder {
         let body_len = row_bytes
             .checked_mul(height as usize)
             .ok_or_else(|| oxideav_core::Error::invalid("farbfeld encoder: body size overflow"))?;
-        let mut body_be = Vec::with_capacity(body_len);
-        for y in 0..height as usize {
-            let row = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
-            // Each pair of LE bytes becomes a pair of BE bytes.
-            for pair in row.chunks_exact(2) {
-                let v = u16::from_le_bytes([pair[0], pair[1]]);
-                body_be.extend_from_slice(&v.to_be_bytes());
-            }
+        // Reject a plane that can't supply `height` full rows at the
+        // declared stride before indexing into it below.
+        let needed = if height == 0 {
+            0
+        } else {
+            (height as usize - 1)
+                .checked_mul(plane.stride)
+                .and_then(|n| n.checked_add(row_bytes))
+                .ok_or_else(|| {
+                    oxideav_core::Error::invalid("farbfeld encoder: plane extent overflow")
+                })?
+        };
+        if plane.data.len() < needed {
+            return Err(oxideav_core::Error::invalid(format!(
+                "farbfeld encoder: plane data {} bytes too short for {height} rows of stride {}",
+                plane.data.len(),
+                plane.stride
+            )));
         }
 
-        let bytes = encode_farbfeld(width, height, &body_be)?;
-        self.pending = Some(bytes);
+        // Build the complete farbfeld file in one allocation: write the
+        // 16-byte header, then swap each LE source row directly into its
+        // contiguous slot in the body — skipping the stride pad and the
+        // intermediate `body_be` Vec + the re-copy `encode_farbfeld`
+        // would have done. `swap_pairs_le_to_be` is the SIMD-friendly
+        // LE->BE byte-order transform shared with the rest of the crate.
+        let mut out = vec![0u8; HEADER_LEN + body_len];
+        out[..8].copy_from_slice(MAGIC);
+        out[8..12].copy_from_slice(&width.to_be_bytes());
+        out[12..16].copy_from_slice(&height.to_be_bytes());
+        for y in 0..height as usize {
+            let src = &plane.data[y * plane.stride..y * plane.stride + row_bytes];
+            let dst_lo = HEADER_LEN + y * row_bytes;
+            let dst = &mut out[dst_lo..dst_lo + row_bytes];
+            swap_pairs_le_to_be(src, dst);
+        }
+        self.pending = Some(out);
         Ok(())
     }
 

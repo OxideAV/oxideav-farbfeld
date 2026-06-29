@@ -64,6 +64,34 @@ pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
     }
 }
 
+/// Byte-swap a little-endian 16-bit sample plane into a big-endian one,
+/// pair by pair, writing into a caller-allocated output buffer.
+///
+/// The framework `Encoder` (gated behind `registry`) is handed canonical
+/// little-endian [`oxideav_core::PixelFormat::Rgba64Le`] rows and must
+/// re-serialise them in the on-disk big-endian word order. Doing that
+/// with this `chunks_exact(2).zip(chunks_exact_mut(2))` shape — instead
+/// of a per-sample `u16::from_le_bytes` / `to_be_bytes` round-trip
+/// through a scalar then an `extend_from_slice` append — lets the
+/// auto-vectoriser fuse the load, 16-bit swap and store into the same
+/// SIMD `bswap` it already emits for [`encode_be_samples`].
+///
+/// Caller's contract: `dst.len() == src.len()` and both are an even
+/// number of bytes. Any trailing odd byte (a malformed half-sample) is
+/// left untouched in `dst` rather than panicking, mirroring the
+/// defensive shape of [`crate::parser::decode_be_samples`]. The host's
+/// own endianness is irrelevant: this is a pure byte-order transform
+/// between two explicit on-wire layouts, so it behaves identically on
+/// big- and little-endian targets.
+#[inline]
+pub(crate) fn swap_pairs_le_to_be(src: &[u8], dst: &mut [u8]) {
+    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+        // LE [lo, hi] -> BE [hi, lo].
+        d[0] = s[1];
+        d[1] = s[0];
+    }
+}
+
 /// Encode a farbfeld file from a raw, already-big-endian RGBA u16 body
 /// plane.
 ///
@@ -358,6 +386,40 @@ mod tests {
         let mut out: [u8; 0] = [];
         encode_le_samples(&[], &mut out);
         assert!(out.is_empty());
+    }
+
+    #[test]
+    fn swap_pairs_le_to_be_reverses_each_two_byte_pair() {
+        // LE [lo, hi] becomes BE [hi, lo] for every sample, and the
+        // result equals reading the LE bytes as a u16 then writing it BE.
+        let src = vec![0x34u8, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xF0, 0xDE];
+        let mut dst = vec![0u8; src.len()];
+        swap_pairs_le_to_be(&src, &mut dst);
+        assert_eq!(dst, vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
+        // Cross-check against the scalar from_le/to_be reference.
+        for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact(2)) {
+            let v = u16::from_le_bytes([s[0], s[1]]);
+            assert_eq!([d[0], d[1]], v.to_be_bytes());
+        }
+    }
+
+    #[test]
+    fn swap_pairs_le_to_be_is_its_own_inverse() {
+        // Applying the LE->BE swap twice restores the original bytes
+        // (the transform is a pure pairwise byte reversal).
+        let src: Vec<u8> = (0..256u16).flat_map(|v| v.to_le_bytes()).collect();
+        let mut once = vec![0u8; src.len()];
+        swap_pairs_le_to_be(&src, &mut once);
+        let mut twice = vec![0u8; src.len()];
+        swap_pairs_le_to_be(&once, &mut twice);
+        assert_eq!(twice, src);
+    }
+
+    #[test]
+    fn swap_pairs_le_to_be_zero_length_is_a_noop() {
+        let mut dst: [u8; 0] = [];
+        swap_pairs_le_to_be(&[], &mut dst);
+        assert!(dst.is_empty());
     }
 
     #[test]
