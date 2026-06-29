@@ -9,6 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `cargo-fuzz` `trait_roundtrip` target: the fourth fuzz target and the
+  first to cover the `registry`-gated framework integration. It fuzzes
+  two surfaces per input — (A) the `oxideav_core::Decoder` + container
+  demuxer over arbitrary attacker bytes (never panics, agrees with the
+  whole-file parser's accept/reject verdict, and re-encodes byte-exact
+  through the framework `Encoder`); (B) the framework `Encoder` over a
+  synthesised frame with attacker-chosen width/height/stride/plane-length
+  (never panics, and any accepted frame emits a parseable file whose
+  big-endian body is the pairwise byte-swap of the source rows). Enables
+  the `registry` feature in the fuzz crate (patching `oxideav-core` to the
+  in-tree path so a single core links). Local run: 9 330 runs / 61 s, 0
+  crashes / 0 leaks.
+
+### Changed
+
+- Framework `Decoder` / `Encoder` hot paths now route through the crate's
+  shared SIMD-friendly byte-order helpers instead of per-sample append
+  loops. The decoder's native→`Rgba64Le` little-endian serialisation uses
+  the new `encode_le_samples` (the LE sibling of `encode_be_samples`,
+  decoding straight into a pre-sized buffer in one pass); the encoder's
+  `Rgba64Le`→on-disk conversion uses the new `swap_pairs_le_to_be` and
+  builds the complete farbfeld file in a single allocation — eliminating
+  the intermediate `body_be` Vec and the redundant full-body re-copy
+  `encode_farbfeld` performed. Output bytes are unchanged (pinned by the
+  existing byte-exact round-trip tests plus a new multi-size probe).
+
+### Fixed
+
+- Framework `Encoder::send_frame` no longer panics when handed a plane
+  too short for its declared dimensions. The old row-slice indexing
+  `plane.data[y*stride .. y*stride+row_bytes]` would go out of range; the
+  encoder now validates the plane extent up front and returns
+  `InvalidData`. New short-plane rejection test.
+- Framework `Decoder::reset()` is now overridden so a container seek
+  leaves the decoder reusable. The trait's default flush-then-drain reset
+  combined with our `flush` (which latches `eof = true`) would have left
+  the decoder permanently end-of-stream, returning `Eof` instead of
+  `NeedMore` on the next `receive_frame`. The override drops any buffered
+  frame and clears the eof latch. Two new tests.
+
 - `FarbfeldStreamWriter::write_all_rows(samples)` and
   `write_all_rows_raw(body)`: bulk-convenience encode entry points that
   round out the streaming API's symmetry with

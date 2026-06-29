@@ -44,9 +44,20 @@ Beyond the core codec the crate ships:
   `pixels`), all `ExactSizeIterator` and `DoubleEndedIterator`, so a
   caller can index by `(x, y)` or walk the frame (in either direction)
   without re-implementing the `(y * width + x) * 4` row-major arithmetic.
-- **Fuzzing** — three `cargo-fuzz` targets (`decode`, `encode`,
-  `stream_io`) drive the whole-file paths and the streaming reader/writer
-  over a choppy `Read`/`Write` transport; no known crashes.
+- **Fuzzing** — four `cargo-fuzz` targets (`decode`, `encode`,
+  `stream_io`, `trait_roundtrip`) drive the whole-file paths, the
+  streaming reader/writer over a choppy `Read`/`Write` transport, and the
+  framework `Decoder` / `Encoder` / demuxer integration; no known crashes.
+- **Framework integration** — the registry-gated `oxideav_core::Decoder`
+  / `Encoder` traits decode to / encode from the canonical
+  `PixelFormat::Rgba64Le` plane. The decode LE serialisation and the
+  encode LE→BE swap share the crate's SIMD-friendly hot-loop helpers
+  (`encode_le_samples` / `swap_pairs_le_to_be`, the little-endian
+  siblings of the parser's BE byte-swap) and build the output in a single
+  pass; the encoder skips stride pad and rejects a plane too short for
+  its declared dimensions instead of panicking. The decoder overrides
+  `reset()` so a container seek leaves it reusable (the default
+  flush-then-drain would otherwise latch end-of-stream permanently).
 - **Property sweep** — `tests/property_sweep.rs` asserts the eight
   spec-mandated invariants across six shape distributions plus four
   malformed-input scenarios, offline and reproducible from a printed
@@ -74,6 +85,8 @@ Beyond the core codec the crate ships:
 | Fuzzing (decode)                | `cargo-fuzz` target, no known crashes |
 | Fuzzing (encode)                | `cargo-fuzz` target (3 whole-file paths + streaming writer agree, 6 invariants + 2 rejection probes), 601 312 runs / 61 s clean |
 | Fuzzing (streaming I/O)         | `cargo-fuzz` target — `FarbfeldStreamReader` / `FarbfeldStreamWriter` over a choppy `Read` / `Write` transport (1..=8-byte chunks), 5 invariants + truncation probe, 2 548 637 runs / 61 s clean |
+| Fuzzing (framework traits)      | `cargo-fuzz` `trait_roundtrip` — `Decoder` / `Encoder` / demuxer over attacker bytes (accept/reject agreement + byte-exact re-encode) and attacker frames (arbitrary width/height/stride/plane-len, no panic), 9 330 runs / 61 s clean |
+| Framework traits                | `oxideav_core::Decoder` / `Encoder` to/from `Rgba64Le`; single-pass SIMD-friendly LE↔BE swap, stride-pad skip, short-plane rejection, reusable `reset()` |
 | Property sweep (PRNG)           | 8 invariants × 6 shape distributions × 96 iters + 4 malformed-input scenarios |
 | Frame accessors                 | random-access (`pixel` / `set_pixel` / `channel` / `row` / `row_mut`) + sequential iterators (`rows` / `rows_mut` / `pixels`, all `ExactSizeIterator`) |
 
