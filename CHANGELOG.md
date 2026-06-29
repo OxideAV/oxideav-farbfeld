@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.4](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.3...v0.0.4) - 2026-06-29
+
+### Other
+
+- gate registry-only LE helpers behind the registry feature
+- README + CHANGELOG for r380 framework-trait hardening + trait_roundtrip fuzz
+- override reset() so a seek leaves the decoder reusable
+- add trait_roundtrip target — framework Decoder/Encoder/demux path
+- one-pass LE->BE swap; reject short planes instead of panicking
+- route LE plane serialisation through shared encode_le_samples helper
+- bulk write_all_rows + write_all_rows_raw on FarbfeldStreamWriter
+- one-shot body reservation in read_all_rows (r328 profile-opt)
+- add stream_skip_rows_bulk + peek_header groups; re-measure full BENCHMARKS baseline
+- refresh to current status, drop per-round changelog cruft
+- DoubleEndedIterator for Rows / RowsMut / Pixels frame iterators
+- r298 bench — add stream_skip_row row-window decode group + BENCHMARKS.md baseline
+- r289 profile — decode read_all_rows into spare capacity (bit-identical, ~+20% at 1024²)
+- add dimension-overflow hardening sweep for header size math
+- add sequential iterator primitives on FarbfeldImage
+- FarbfeldImage spatial accessors — pixel / set_pixel / channel / row / row_mut / pixel_count
+- drop release-plz.toml — use release-plz defaults across the workspace
+- add stream_read_row_raw + stream_write_row_raw Criterion groups
+- read_row_raw + write_row_raw — raw-bytes pass-through pair
+- add cargo-fuzz stream_io target — choppy Read/Write transport
+- SIMD-friendly hot-path BE swap (10× on parse, 9× on encode_image)
+- FarbfeldStreamReader::skip_row + skip_rows for row-window decode
+- peek_farbfeld_dimensions + FarbfeldHeader::total_len + spec-citation alignment
+- add cargo-fuzz encode target (3 whole-file paths + streaming writer)
+- add deterministic property-style sweep + neutral-language scrub
+
 ### Added
 
 - `cargo-fuzz` `trait_roundtrip` target: the fourth fuzz target and the
