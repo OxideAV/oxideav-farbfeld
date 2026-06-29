@@ -37,6 +37,33 @@ pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
     }
 }
 
+/// Serialise a flat plane of native-endian `u16` samples into a
+/// little-endian byte buffer pre-allocated by the caller.
+///
+/// The little-endian sibling of [`encode_be_samples`]. The framework
+/// `Decoder` impl (gated behind the `registry` feature) hands the
+/// framework a canonical little-endian
+/// [`oxideav_core::PixelFormat::Rgba64Le`] plane, so the on-disk
+/// big-endian samples decoded by the parser have to be re-serialised
+/// in LE word order for `VideoPlane.data`. Routing that through this
+/// shared helper — the same `iter().zip(chunks_exact_mut(2))` shape the
+/// auto-vectoriser already lifts into a SIMD store for the BE path —
+/// keeps the decode hot loop off the slower per-sample
+/// `extend_from_slice(&sample.to_le_bytes())` append it used before.
+///
+/// Caller's contract: `out.len() == samples.len() * 2`. On a
+/// little-endian host every `to_le_bytes()` is the identity layout, so
+/// the loop collapses to a straight `memcpy`; on a big-endian host it
+/// is the 16-bit byte-swap mirror of [`encode_be_samples`].
+#[inline]
+pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
+    for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
+        let le = sample.to_le_bytes();
+        slot[0] = le[0];
+        slot[1] = le[1];
+    }
+}
+
 /// Encode a farbfeld file from a raw, already-big-endian RGBA u16 body
 /// plane.
 ///
@@ -290,6 +317,47 @@ mod tests {
         assert_eq!(&bytes[2..4], &[0x00, 0x01]); // sample 1
         assert_eq!(&bytes[510..512], &[0x00, 0xFF]); // sample 255
         assert_eq!(&bytes[512..514], &[0x01, 0x00]); // sample 256
+    }
+
+    #[test]
+    fn encode_le_samples_writes_little_endian_word_order() {
+        // The LE helper underpins the framework decode hot loop. Prove
+        // it emits the low byte first for every sample and is the exact
+        // inverse of a `from_le_bytes` read.
+        let samples: Vec<u16> = (0..1024u16).collect();
+        let mut bytes = vec![0u8; samples.len() * 2];
+        encode_le_samples(&samples, &mut bytes);
+        // Spot-check the LE byte order on a few samples.
+        assert_eq!(&bytes[0..2], &[0x00, 0x00]); // sample 0
+        assert_eq!(&bytes[2..4], &[0x01, 0x00]); // sample 1 -> [lo, hi]
+        assert_eq!(&bytes[510..512], &[0xFF, 0x00]); // sample 255
+        assert_eq!(&bytes[512..514], &[0x00, 0x01]); // sample 256
+                                                     // Round-trip: from_le_bytes reproduces every sample.
+        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+            assert_eq!(u16::from_le_bytes([pair[0], pair[1]]), samples[i]);
+        }
+    }
+
+    #[test]
+    fn encode_le_samples_and_encode_be_samples_swap_each_other_byte_order() {
+        // BE and LE serialisations of the same plane are byte-reversed
+        // within every 2-byte pair.
+        let samples: Vec<u16> = vec![0x1234, 0x5678, 0x9ABC, 0xDEF0];
+        let mut be = vec![0u8; samples.len() * 2];
+        let mut le = vec![0u8; samples.len() * 2];
+        encode_be_samples(&samples, &mut be);
+        encode_le_samples(&samples, &mut le);
+        for (b, l) in be.chunks_exact(2).zip(le.chunks_exact(2)) {
+            assert_eq!(b[0], l[1]);
+            assert_eq!(b[1], l[0]);
+        }
+    }
+
+    #[test]
+    fn encode_le_samples_zero_length_is_a_noop() {
+        let mut out: [u8; 0] = [];
+        encode_le_samples(&[], &mut out);
+        assert!(out.is_empty());
     }
 
     #[test]

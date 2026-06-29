@@ -8,6 +8,7 @@
 //! straight into image-conversion or display code without further byte
 //! shuffling.
 
+use crate::encoder::encode_le_samples;
 use crate::parser::parse_farbfeld;
 
 use oxideav_core::Decoder;
@@ -37,14 +38,23 @@ impl Decoder for FarbfeldDecoder {
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
         let image = parse_farbfeld(&packet.data)?;
         // Convert native-endian u16 samples to the canonical little-endian
-        // byte layout expected by `PixelFormat::Rgba64Le`.
+        // byte layout expected by `PixelFormat::Rgba64Le`. Route through
+        // the crate's shared SIMD-friendly `encode_le_samples` helper —
+        // the same `iter().zip(chunks_exact_mut(2))` shape the
+        // auto-vectoriser lifts into a single store — rather than a
+        // per-sample `extend_from_slice` append, so the framework decode
+        // path matches the standalone parser/encoder hot loops.
         let stride = (image.width as usize)
             .checked_mul(8)
             .ok_or_else(|| oxideav_core::Error::invalid("farbfeld: stride overflow"))?;
-        let mut data = Vec::with_capacity(stride * image.height as usize);
-        for &sample in &image.pixels {
-            data.extend_from_slice(&sample.to_le_bytes());
-        }
+        let body_len = stride
+            .checked_mul(image.height as usize)
+            .ok_or_else(|| oxideav_core::Error::invalid("farbfeld: plane size overflow"))?;
+        // `body_len == image.pixels.len() * 2` whenever the parser
+        // succeeded (pixels = width*height*4 samples, body = ×2 bytes);
+        // size the buffer to the on-disk body and fill it in one pass.
+        let mut data = vec![0u8; body_len];
+        encode_le_samples(&image.pixels, &mut data);
         self.pending = Some(VideoFrame {
             pts: packet.pts,
             planes: vec![VideoPlane { stride, data }],
