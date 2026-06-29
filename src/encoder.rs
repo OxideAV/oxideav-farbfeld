@@ -55,6 +55,11 @@ pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
 /// little-endian host every `to_le_bytes()` is the identity layout, so
 /// the loop collapses to a straight `memcpy`; on a big-endian host it
 /// is the 16-bit byte-swap mirror of [`encode_be_samples`].
+///
+/// Only the framework `Decoder` consumes this, so it is gated behind the
+/// `registry` feature — a standalone (`oxideav-core`-free) build never
+/// produces an `Rgba64Le` plane and would see it as dead code.
+#[cfg(feature = "registry")]
 #[inline]
 pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
     for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
@@ -83,6 +88,11 @@ pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
 /// own endianness is irrelevant: this is a pure byte-order transform
 /// between two explicit on-wire layouts, so it behaves identically on
 /// big- and little-endian targets.
+///
+/// Only the framework `Encoder` consumes this, so it is gated behind the
+/// `registry` feature — a standalone build never sees an `Rgba64Le`
+/// plane and would flag it as dead code.
+#[cfg(feature = "registry")]
 #[inline]
 pub(crate) fn swap_pairs_le_to_be(src: &[u8], dst: &mut [u8]) {
     for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
@@ -347,6 +357,7 @@ mod tests {
         assert_eq!(&bytes[512..514], &[0x01, 0x00]); // sample 256
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn encode_le_samples_writes_little_endian_word_order() {
         // The LE helper underpins the framework decode hot loop. Prove
@@ -366,6 +377,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn encode_le_samples_and_encode_be_samples_swap_each_other_byte_order() {
         // BE and LE serialisations of the same plane are byte-reversed
@@ -381,6 +393,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn encode_le_samples_zero_length_is_a_noop() {
         let mut out: [u8; 0] = [];
@@ -388,6 +401,7 @@ mod tests {
         assert!(out.is_empty());
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn swap_pairs_le_to_be_reverses_each_two_byte_pair() {
         // LE [lo, hi] becomes BE [hi, lo] for every sample, and the
@@ -403,6 +417,7 @@ mod tests {
         }
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn swap_pairs_le_to_be_is_its_own_inverse() {
         // Applying the LE->BE swap twice restores the original bytes
@@ -415,6 +430,7 @@ mod tests {
         assert_eq!(twice, src);
     }
 
+    #[cfg(feature = "registry")]
     #[test]
     fn swap_pairs_le_to_be_zero_length_is_a_noop() {
         let mut dst: [u8; 0] = [];
