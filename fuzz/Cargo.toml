@@ -39,9 +39,24 @@ cargo-fuzz = true
 [dependencies]
 libfuzzer-sys = "0.4"
 
+# The `decode` / `encode` / `stream_io` targets only need the standalone
+# parser/encoder, but the `trait_roundtrip` target drives the framework
+# Decoder / Encoder behind the `registry` feature (which pulls
+# `oxideav-core`). Cargo unifies features across a build, so enabling
+# `registry` here turns it on for every target; the standalone API stays
+# fully available, so the no-framework targets compile unchanged.
 [dependencies.oxideav-farbfeld]
 path = ".."
-default-features = false
+default-features = true
+features = ["registry"]
+
+# `trait_roundtrip` constructs `oxideav_core` frame/packet types directly.
+# `oxideav-farbfeld` depends on `oxideav-core = "0.1"` from crates.io; the
+# patch below redirects that to the in-tree core so the fuzz crate links a
+# single `oxideav-core` (otherwise the framework types the target builds
+# wouldn't match the ones the encoder/decoder traits expect).
+[dependencies.oxideav-core]
+path = "../../oxideav-core"
 
 [lib]
 name = "oxideav_farbfeld_fuzz"
@@ -50,6 +65,13 @@ path = "src/lib.rs"
 # Prevent this from interfering with the umbrella workspace.
 [workspace]
 members = ["."]
+
+# `oxideav-farbfeld`'s `oxideav-core = "0.1"` dep would otherwise resolve
+# to a crates.io copy distinct from the in-tree `oxideav-core` the
+# `trait_roundtrip` target links directly, producing two incompatible
+# `Frame`/`Packet` types. Patch both to the same local crate.
+[patch.crates-io]
+oxideav-core = { path = "../../oxideav-core" }
 
 [profile.release]
 debug = 1
@@ -69,5 +91,11 @@ doc = false
 [[bin]]
 name = "stream_io"
 path = "fuzz_targets/stream_io.rs"
+test = false
+doc = false
+
+[[bin]]
+name = "trait_roundtrip"
+path = "fuzz_targets/trait_roundtrip.rs"
 test = false
 doc = false
