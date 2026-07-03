@@ -1,5 +1,7 @@
 # oxideav-farbfeld
 
+[![CI](https://github.com/OxideAV/oxideav-farbfeld/actions/workflows/ci.yml/badge.svg)](https://github.com/OxideAV/oxideav-farbfeld/actions/workflows/ci.yml) [![crates.io](https://img.shields.io/crates/v/oxideav-farbfeld.svg)](https://crates.io/crates/oxideav-farbfeld) [![docs.rs](https://docs.rs/oxideav-farbfeld/badge.svg)](https://docs.rs/oxideav-farbfeld) [![License: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE)
+
 Pure-Rust farbfeld reader/writer.
 
 farbfeld is a minimalist lossless image format: 16 bytes of header
