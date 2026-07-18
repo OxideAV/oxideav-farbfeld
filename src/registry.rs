@@ -58,3 +58,33 @@ pub fn register(codecs: &mut CodecRegistry, containers: &mut ContainerRegistry) 
     register_codecs(codecs);
     register_containers(containers);
 }
+
+/// Register codecs + containers into an `oxideav_core::RuntimeContext`
+/// — the form `oxideav_meta::register_all` dispatches via the
+/// [`oxideav_core::register!`] macro below. The two-registry
+/// [`register`] above remains the direct API.
+pub fn register_runtime(ctx: &mut oxideav_core::RuntimeContext) {
+    register(&mut ctx.codecs, &mut ctx.containers);
+}
+
+oxideav_core::register!("farbfeld", register_runtime);
+
+#[cfg(test)]
+mod runtime_entry_tests {
+    use super::*;
+
+    #[test]
+    fn oxideav_entry_installs_codec_and_container() {
+        let mut ctx = oxideav_core::RuntimeContext::new();
+        __oxideav_entry(&mut ctx);
+        assert!(
+            ctx.codecs.decoder_ids().next().is_some(),
+            "__oxideav_entry should install codec decoder factories"
+        );
+        assert_eq!(
+            ctx.containers.container_for_extension("farbfeld"),
+            Some("farbfeld"),
+            "__oxideav_entry should install the .farbfeld extension hint"
+        );
+    }
+}

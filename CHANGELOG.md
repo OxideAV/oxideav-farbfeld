@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `register_runtime` + the `oxideav_core::register!` entry point, so
+  `oxideav_meta::register_all` now dispatches this crate automatically;
+  the two-registry `register` remains the direct API.
+
+### Added
+
 - `cargo-fuzz` `trait_roundtrip` target: the fourth fuzz target and the
   first to cover the `registry`-gated framework integration. It fuzzes
   two surfaces per input — (A) the `oxideav_core::Decoder` + container

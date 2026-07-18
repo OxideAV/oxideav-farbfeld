@@ -81,4 +81,6 @@ pub use parser::{
 pub use stream::{FarbfeldStreamReader, FarbfeldStreamWriter};
 
 #[cfg(feature = "registry")]
-pub use registry::{register, register_codecs, register_containers};
+pub use registry::{
+    __oxideav_entry, register, register_codecs, register_containers, register_runtime,
+};
