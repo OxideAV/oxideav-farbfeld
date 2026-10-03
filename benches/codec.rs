@@ -427,6 +427,45 @@ fn bench_peek_header(c: &mut Criterion) {
     g.finish();
 }
 
+/// The contract paths at photo size: one 4000×3000 (12 MP, 96 000 000
+/// body bytes) `Rgba64Le` frame through `decode`, `decode_from`,
+/// `decode_rgba8`, `encode` and `encode_to`. Reported in the README
+/// "Limits" section; 10 samples because each iteration moves ~96 MB.
+fn bench_contract_12mp(c: &mut Criterion) {
+    use oxideav_farbfeld::{decode, decode_from, decode_rgba8, encode, encode_to, EncodeOptions};
+
+    let (w, h) = (4000u32, 3000u32);
+    let pixels = pattern_pixels(w, h);
+    let stream = pattern_full_stream(w, h, &pixels);
+    drop(pixels);
+    let img = decode(&stream).expect("12 MP fixture decodes");
+    let opts = EncodeOptions::default();
+
+    let mut g = c.benchmark_group("contract_12mp");
+    g.sample_size(10);
+    g.throughput(Throughput::Bytes(stream.len() as u64));
+    g.bench_function("decode", |b| {
+        b.iter(|| black_box(decode(black_box(&stream)).unwrap()));
+    });
+    g.bench_function("decode_from", |b| {
+        b.iter(|| black_box(decode_from(Cursor::new(black_box(&stream))).unwrap()));
+    });
+    g.bench_function("decode_rgba8", |b| {
+        b.iter(|| black_box(decode_rgba8(black_box(&stream)).unwrap()));
+    });
+    g.bench_function("encode", |b| {
+        b.iter(|| black_box(encode(black_box(&img), &opts).unwrap()));
+    });
+    g.bench_function("encode_to", |b| {
+        b.iter(|| {
+            let mut out = Vec::with_capacity(stream.len());
+            encode_to(black_box(&img), &opts, &mut out).unwrap();
+            black_box(out)
+        });
+    });
+    g.finish();
+}
+
 criterion_group!(
     benches,
     bench_parse_whole,
@@ -440,5 +479,6 @@ criterion_group!(
     bench_stream_skip_row,
     bench_stream_skip_rows_bulk,
     bench_peek_header,
+    bench_contract_12mp,
 );
 criterion_main!(benches);
