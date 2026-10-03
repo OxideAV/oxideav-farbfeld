@@ -109,9 +109,13 @@ pub fn from_color_signal(s: &ColorSignal) -> ColorInfo {
 // ---- frame bridge ---------------------------------------------------------
 
 /// [`FarbfeldImage`] → `VideoFrame`, moving the plane out of the image:
-/// one packed `Rgba64Le` plane plus the colour-signal side-channel when
-/// the image's colour is specified (a decoded image always is: the
-/// crate's sRGB convention, since the file itself carries no tag).
+/// one packed `Rgba64Le` plane, plus the colour-signal side-channel
+/// **only** when the image's `color` is a caller-set description that
+/// differs from the crate's sRGB convention. The file carries no colour
+/// tag and the format defines no colour semantics, so a decoded image
+/// (always [`ColorInfo::farbfeld_default`]) yields a frame with no
+/// colour signal; the convention stays on the standalone `ColorInfo`
+/// (`IMAGE_CRATE_API` stamping ruling).
 pub(crate) fn image_into_video_frame(mut image: FarbfeldImage, pts: Option<i64>) -> VideoFrame {
     let stride = image.stride();
     let data = if image.planes.is_empty() {
@@ -124,18 +128,18 @@ pub(crate) fn image_into_video_frame(mut image: FarbfeldImage, pts: Option<i64>)
         planes: vec![VideoPlane { stride, data }],
     };
     let c = image.color;
-    if c.primaries != ColorInfo::UNSPECIFIED
+    let specified = c.primaries != ColorInfo::UNSPECIFIED
         || c.transfer != ColorInfo::UNSPECIFIED
-        || c.range == ColorRange::Limited
-    {
+        || c.range == ColorRange::Limited;
+    if specified && c != ColorInfo::farbfeld_default() {
         frame.set_color_signal(to_color_signal(&c));
     }
     frame
 }
 
 impl From<FarbfeldImage> for VideoFrame {
-    /// The pixel plane (`pts` `None`) plus the colour-signal
-    /// side-channel.
+    /// The pixel plane (`pts` `None`); a colour-signal side-channel only
+    /// for a caller-set `color` other than the sRGB convention.
     fn from(image: FarbfeldImage) -> Self {
         image_into_video_frame(image, None)
     }
@@ -337,14 +341,14 @@ mod tests {
         let back2 = FarbfeldImage::try_from((&frame, &params)).unwrap();
         assert_eq!(back2, img);
 
-        // A decoded image carries the sRGB convention, which is stamped.
+        // A decoded image carries the sRGB convention, which is NOT
+        // stamped: the file has no colour tag and the format defines no
+        // colour semantics. The convention is restored on the way back.
         let frame = VideoFrame::from(tight.clone());
-        assert_eq!(
-            frame.color_signal().unwrap(),
-            to_color_signal(&ColorInfo::srgb())
-        );
+        assert!(frame.color_signal().is_none());
         let back = FarbfeldImage::from_video_frame(&frame, &params).unwrap();
         assert_eq!(back, tight);
+        assert_eq!(back.color, ColorInfo::farbfeld_default());
 
         // Unspecified colour is not stamped and keeps the convention.
         let frame = VideoFrame::from(tight.clone().with_color(ColorInfo::unspecified()));

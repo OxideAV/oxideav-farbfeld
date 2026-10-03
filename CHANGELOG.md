@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- **Registry frames no longer carry the sRGB convention as a colour
+  signal.** farbfeld files have no colour tag and the format defines no
+  colour semantics, so the framework `Decoder` and `From<FarbfeldImage>
+  for VideoFrame` emit no colour-signal side-channel for a decoded image
+  (`IMAGE_CRATE_API` stamping ruling); the convention stays on the
+  standalone `FarbfeldImage::color` and `from_video_frame` restores it.
+  A caller-set `color` other than the convention is still forwarded.
+  Pixel planes are byte-identical to before.
+- `Cargo.toml` `exclude = ["/tests", "/fuzz"]` (crates.io 10 MiB cap).
+
 - The crate now follows the OxideAV image-crate API contract
   (`IMAGE_CRATE_API`). Root vocabulary: `probe`, `info -> ImageInfo`,
   `decode` / `decode_with(&DecodeOptions)` / `decode_rgb8` /
@@ -50,8 +60,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   its row buffer lazily (a zero-height image with a multi-gigapixel
   width no longer reserves the row).
 - Framework `Decoder` / `Encoder` are thin adapters over the standalone
-  `decode` / `encode`; frames carry the colour-signal side-channel (the
-  crate's sRGB convention); the demuxer validates through `info` + exact
+  `decode` / `encode`; the demuxer validates through `info` + exact
   file length instead of decoding pixels.
 - `ci-standalone` runs the full test suite and clippy with
   `--no-default-features`.

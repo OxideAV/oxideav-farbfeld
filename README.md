@@ -76,8 +76,9 @@ let dec = oxideav_farbfeld::make_decoder(&params)?;   // oxideav_core::Decoder
 let enc = oxideav_farbfeld::make_encoder(&params)?;   // oxideav_core::Encoder
 ```
 
-`From<FarbfeldImage> for VideoFrame` (one packed `Rgba64Le` plane plus
-the colour-signal side-channel) and
+`From<FarbfeldImage> for VideoFrame` (one packed `Rgba64Le` plane; a
+colour-signal side-channel only for a caller-set `color` other than the
+sRGB convention) and
 `FarbfeldImage::from_video_frame(&VideoFrame, &CodecParameters) ->
 Result<_, FarbfeldError>` / `TryFrom<(&VideoFrame, &CodecParameters)>`
 bridge the two layers; `FarbfeldPixelFormat` ↔ `oxideav_core::PixelFormat`
@@ -142,8 +143,12 @@ the crate's documented **convention**, sRGB:
 |---|
 | `Full`, 1 (BT.709 / sRGB), 13 (IEC 61966-2-1 sRGB), 0 (identity / RGB) — `ColorInfo::farbfeld_default()` |
 
-A caller-set `color` is accepted, kept on the image, forwarded to the
-registry frame's colour-signal side-channel, and not written to the file.
+The convention is **not stamped on registry frames**: the file carries
+no colour tag and the format defines no colour semantics, so a decoded
+frame has no colour-signal side-channel (`from_video_frame` restores the
+convention). A caller-set `color` is accepted, kept on the image,
+forwarded to the frame's colour-signal side-channel when it differs
+from the convention, and never written to the file.
 
 ## Limits
 

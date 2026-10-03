@@ -83,14 +83,15 @@ fn decoder_consumes_packet_emits_frame_in_rgba64le() {
         Frame::Video(v) => v,
         _ => panic!("expected video frame"),
     };
-    // One image plane; the colour-signal side-channel (the crate's sRGB
-    // convention) rides along as a non-image plane.
+    // One image plane and nothing else: the file carries no colour tag,
+    // so the crate's sRGB convention is not stamped on the frame.
     assert_eq!(vf.image_plane_count(), 1);
+    assert_eq!(vf.planes.len(), 1);
     assert_eq!(vf.planes[0].stride, 2 * 8);
     assert_eq!(vf.planes[0].data.len(), 2 * 2 * 8);
     // First pixel is i=0 → all zeroes.
     assert_eq!(&vf.planes[0].data[..8], &[0u8; 8]);
-    assert!(vf.color_signal().is_some());
+    assert!(vf.color_signal().is_none());
 }
 
 #[test]

@@ -4,8 +4,9 @@
 //! standalone [`crate::decode`]: the decoder accepts one complete
 //! farbfeld file per packet and emits one [`VideoFrame`] per packet in
 //! the native `Rgba64Le` layout (the big-endian wire samples
-//! byte-swapped to little-endian), with the colour-signal side-channel
-//! carrying the crate's sRGB convention.
+//! byte-swapped to little-endian). No colour-signal side-channel: the
+//! file carries no colour tag, so the crate's sRGB convention stays on
+//! the standalone [`crate::ColorInfo`] and is not stamped on the frame.
 
 use crate::image::FarbfeldImage;
 use crate::registry::image_into_video_frame;

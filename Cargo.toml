@@ -9,6 +9,8 @@ homepage = "https://github.com/OxideAV/oxideav-farbfeld"
 authors = ["Mark Karpeles"]
 description = "Pure-Rust farbfeld reader/writer — minimalist lossless 16-bit RGBA image format"
 readme = "README.md"
+# crates.io caps packages at 10 MiB; fixtures and the fuzz tree stay in git only.
+exclude = ["/tests", "/fuzz"]
 keywords = ["multimedia", "image", "farbfeld", "codec", "pure-rust"]
 categories = ["multimedia::encoding", "multimedia::images"]
 
