@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- The crate now follows the OxideAV image-crate API contract
+  (`IMAGE_CRATE_API`). Root vocabulary: `probe`, `info -> ImageInfo`,
+  `decode` / `decode_with(&DecodeOptions)` / `decode_rgb8` /
+  `decode_rgba8` / `decode_from<R: Read>`, `encode(&FarbfeldImage,
+  &EncodeOptions)` / `encode_rgb8` / `encode_rgba8` / `encode_to<W:
+  Write>`, plus the 16-bit depth pair `decode_rgba16` / `encode_rgba16`
+  and the limit-taking `decode_from_with` / `decode_rgba16_with`.
+- **`FarbfeldImage` changed meaning**: it is now the contract image
+  `{ width, height, format: PixelFormat, planes: Vec<Plane>, color:
+  ColorInfo, metadata: Metadata }` holding one packed `Rgba64Le` plane
+  (the wire's big-endian samples byte-swapped to little-endian), with
+  fallible `new` / `packed` / `from_rgb8` / `from_rgba8` / `from_rgba16`
+  / `from_rgba64le` and `width()` / `height()` / `format()` / `stride()`
+  / `as_bytes()` / `into_raw()` / `to_rgb8()` / `to_rgba8()` /
+  `to_rgba16()`. The previous `FarbfeldImage { width, height, pixels:
+  Vec<u16> }` is now `Rgba16Image { width, height, data: Vec<u16> }`
+  (same accessors and iterators; `new` returns `Result` instead of
+  `Option`) and converts losslessly both ways with the contract image.
+  Migration: `parse_farbfeld(b)?.pixels` → `decode_rgba16(b)?.data`
+  (or `decode(b)?.to_rgba16().data`).
+- New contract records: `Plane`, `ColorInfo` / `ColorRange`, `Metadata`,
+  `RgbImage` / `RgbaImage`, `ImageInfo`, `FarbfeldPixelFormat {
+  Rgba64Le }` + `PixelFormat` alias, `DecodeOptions` (1 GiB default
+  decoded-bytes cap, limits enforced before allocation, `strict` a
+  documented no-op), `EncodeOptions` (empty, `#[non_exhaustive]`).
+- `FarbfeldError` gained `Unsupported`, `LimitExceeded` and
+  `Io(std::io::Error)` (+ `From<std::io::Error>`), is
+  `#[non_exhaustive]`, and no longer derives `Clone` / `PartialEq` /
+  `Eq`; `pub type Error = FarbfeldError`. A `width × height × 8` that
+  overflows `usize` is now `Unsupported` (was `InvalidData`); genuine
+  I/O failures on the streaming pair are `Io` (a premature end of input
+  stays `InvalidData`).
+- `register` now takes `&mut RuntimeContext` (the fleet signature); the
+  previous two-registry `register(codecs, containers)` is
+  `register_registries`. `make_decoder` / `make_encoder` are re-exported
+  at the crate root.
+- `decode_from` / `encode_to` are genuinely streaming through
+  `FarbfeldStreamReader` / `FarbfeldStreamWriter`; the writer allocates
+  its row buffer lazily (a zero-height image with a multi-gigapixel
+  width no longer reserves the row).
+- Framework `Decoder` / `Encoder` are thin adapters over the standalone
+  `decode` / `encode`; frames carry the colour-signal side-channel (the
+  crate's sRGB convention); the demuxer validates through `info` + exact
+  file length instead of decoding pixels.
+- `ci-standalone` runs the full test suite and clippy with
+  `--no-default-features`.
+
+### Added
+
+- Frame bridge under `registry`: `From<FarbfeldImage> for VideoFrame`,
+  `FarbfeldImage::from_video_frame(&VideoFrame, &CodecParameters) ->
+  Result<_, FarbfeldError>`, `TryFrom<(&VideoFrame, &CodecParameters)>`,
+  and the `FarbfeldPixelFormat` ↔ `PixelFormat` / `ColorInfo` ↔
+  `ColorSignal` maps.
+- `tests/contract.rs`: exact round-trip property over 53 random shapes
+  of random 16-bit samples (plus every sample value through every
+  channel) across every contract path.
+- `cargo-fuzz` `contract` target (probe / info / decode / decode_with /
+  decode_from / raw paths / encode round trips / limits).
+- `contract_12mp` Criterion group; the README records the 4000×3000
+  numbers.
+
+### Deprecated
+
+- `parse_farbfeld` (now returns `Rgba16Image`, unlimited) → `decode` /
+  `decode_rgba16`; `parse_farbfeld_header` / `peek_farbfeld_dimensions`
+  → `info`; `encode_farbfeld` → `encode` / `encode_rgba16` /
+  `FarbfeldStreamWriter::write_all_rows_raw`; `encode_farbfeld_from_rgba16`
+  → `encode_rgba16`; `encode_farbfeld_image` → `encode` / `encode_rgba16`;
+  `register_runtime` → `register`. All remain for one release as thin
+  wrappers with byte-identical output.
+
 ## [0.0.4](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.3...v0.0.4) - 2026-07-18
 
 ### Other

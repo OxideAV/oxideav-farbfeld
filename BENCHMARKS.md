@@ -114,3 +114,17 @@ baseline shows it climbing from ~38.6 GiB/s at 64×64 to ~67.8 GiB/s at
 body, comfortably ahead of `stream_read_row_raw` (~36 GiB/s at
 1024×1024), which additionally copies each row's bytes into the caller
 slot.
+
+## `contract_12mp` (round 467)
+
+The image-crate API contract paths at photo size — one 4000×3000
+`Rgba64Le` frame, 96 000 000 body bytes, 10 samples per path. Apple M4
+Max, single thread, release build:
+
+| Path | Time | Throughput (body bytes) |
+|---|---|---|
+| `decode` | 2.06 ms | 43 GiB/s |
+| `decode_from` (`Cursor`) | 3.04 ms | 29 GiB/s |
+| `decode_rgba8` | 6.71 ms | 13 GiB/s |
+| `encode` | 2.06 ms | 43 GiB/s |
+| `encode_to` (`Vec` sink) | 2.20 ms | 41 GiB/s |
