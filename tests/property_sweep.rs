@@ -24,7 +24,7 @@
 //! For every randomly generated `(width, height, pixels)`:
 //!
 //! 1. **Lossless roundtrip.** `parse_farbfeld(encode_*(w, h, px))`
-//!    returns an `Ok(FarbfeldImage)` whose `(width, height, pixels)`
+//!    returns an `Ok(Rgba16Image)` whose `(width, height, pixels)`
 //!    equals the input. This is the spec's primary guarantee — the
 //!    format is uncompressed and bit-exact.
 //!
@@ -51,7 +51,7 @@
 //!
 //! 6. **Streaming agrees with whole-file.** `FarbfeldStreamReader` over
 //!    the encoded bytes yields a flat sample buffer identical to
-//!    `parse_farbfeld(...).pixels`, and `FarbfeldStreamWriter` driven
+//!    `parse_farbfeld(...).data`, and `FarbfeldStreamWriter` driven
 //!    one row at a time produces a byte stream identical to
 //!    `encode_farbfeld_image`. Drift between the two API shapes would
 //!    silently break callers picking either path.
@@ -71,11 +71,13 @@
 //! wide+short) so the sweep covers both the per-pixel arithmetic and
 //! the header/dimension handling in the same pass.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use std::io::Cursor;
 
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    parse_farbfeld_header, FarbfeldImage, FarbfeldStreamReader, FarbfeldStreamWriter,
+    parse_farbfeld_header, FarbfeldStreamReader, FarbfeldStreamWriter, Rgba16Image,
     BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
 };
 
@@ -197,7 +199,7 @@ fn random_pixels(width: u32, height: u32, rng: &mut XorShift32) -> Vec<[u16; 4]>
 }
 
 /// Pack the per-pixel `[u16; 4]` representation into the flat row-major
-/// `Vec<u16>` that `FarbfeldImage` carries.
+/// `Vec<u16>` that `Rgba16Image` carries.
 fn flatten(pixels: &[[u16; 4]]) -> Vec<u16> {
     let mut out = Vec::with_capacity(pixels.len() * 4);
     for px in pixels {
@@ -230,10 +232,10 @@ fn check_all_invariants(seed: u32, label: &str, width: u32, height: u32, pixels:
     let body_be = flatten_be(pixels);
 
     // (1) + (3) + (5) — encode_farbfeld_image is the canonical path.
-    let encoded_image = encode_farbfeld_image(&FarbfeldImage {
+    let encoded_image = encode_farbfeld_image(&Rgba16Image {
         width,
         height,
-        pixels: flat.clone(),
+        data: flat.clone(),
     })
     .unwrap_or_else(|e| {
         panic!("seed={seed} label={label} encode_farbfeld_image failed on {width}×{height}: {e}")
@@ -284,10 +286,10 @@ fn check_all_invariants(seed: u32, label: &str, width: u32, height: u32, pixels:
     );
 
     // (4) Encoder determinism — encoding twice must be byte-identical.
-    let encoded_again = encode_farbfeld_image(&FarbfeldImage {
+    let encoded_again = encode_farbfeld_image(&Rgba16Image {
         width,
         height,
-        pixels: flat.clone(),
+        data: flat.clone(),
     })
     .expect("second encode must succeed on the same input");
     assert_eq!(
@@ -308,7 +310,7 @@ fn check_all_invariants(seed: u32, label: &str, width: u32, height: u32, pixels:
         "seed={seed} label={label}: decoded height mismatch",
     );
     assert_eq!(
-        decoded.pixels, flat,
+        decoded.data, flat,
         "seed={seed} label={label}: roundtrip mutated pixels at {width}×{height}",
     );
 
@@ -457,10 +459,10 @@ fn property_sweep_corrupted_magic_always_rejected() {
     for _ in 0..64 {
         let (w, h) = (rng.next_in(8) + 1, rng.next_in(8) + 1);
         let pixels = random_pixels(w, h, &mut rng);
-        let mut bytes = encode_farbfeld_image(&FarbfeldImage {
+        let mut bytes = encode_farbfeld_image(&Rgba16Image {
             width: w,
             height: h,
-            pixels: flatten(&pixels),
+            data: flatten(&pixels),
         })
         .unwrap();
         let pos = (rng.next_in(7)) as usize;
@@ -489,10 +491,10 @@ fn property_sweep_trailing_garbage_always_rejected() {
     for _ in 0..64 {
         let (w, h) = (rng.next_in(8) + 1, rng.next_in(8) + 1);
         let pixels = random_pixels(w, h, &mut rng);
-        let mut bytes = encode_farbfeld_image(&FarbfeldImage {
+        let mut bytes = encode_farbfeld_image(&Rgba16Image {
             width: w,
             height: h,
-            pixels: flatten(&pixels),
+            data: flatten(&pixels),
         })
         .unwrap();
         bytes.push((rng.next_u32() & 0xFF) as u8);
@@ -514,10 +516,10 @@ fn property_sweep_truncated_body_always_rejected() {
         // safely drop.
         let (w, h) = (rng.next_in(7) + 1, rng.next_in(7) + 1);
         let pixels = random_pixels(w, h, &mut rng);
-        let mut bytes = encode_farbfeld_image(&FarbfeldImage {
+        let mut bytes = encode_farbfeld_image(&Rgba16Image {
             width: w,
             height: h,
-            pixels: flatten(&pixels),
+            data: flatten(&pixels),
         })
         .unwrap();
         bytes.pop();

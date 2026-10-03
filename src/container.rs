@@ -17,7 +17,7 @@ use oxideav_core::{
     ContainerRegistry, Demuxer, Muxer, ProbeData, ProbeScore, ReadSeek, WriteSeek, MAX_PROBE_SCORE,
 };
 
-use crate::parser::{parse_farbfeld, MAGIC};
+use crate::api::{info, probe as probe_magic};
 
 pub fn register(reg: &mut ContainerRegistry) {
     reg.register_demuxer("farbfeld", open_demuxer);
@@ -28,7 +28,7 @@ pub fn register(reg: &mut ContainerRegistry) {
 }
 
 fn probe(data: &ProbeData) -> ProbeScore {
-    if data.buf.len() >= 8 && &data.buf[..8] == MAGIC {
+    if probe_magic(data.buf) {
         return MAX_PROBE_SCORE;
     }
     if matches!(data.ext, Some("ff") | Some("farbfeld")) {
@@ -45,9 +45,18 @@ pub fn open_demuxer(
     input.seek(SeekFrom::Start(0))?;
     let mut buf = Vec::new();
     input.read_to_end(&mut buf)?;
-    // Validate the header eagerly so the demuxer can publish accurate
-    // (width, height) on the StreamInfo before the decoder even runs.
-    let parsed = parse_farbfeld(&buf)?;
+    // Validate the header and the exact file length eagerly (the same
+    // accept / reject verdict as the whole-file decoder, without
+    // decoding pixels) so the demuxer can publish accurate (width,
+    // height) on the StreamInfo before the decoder even runs.
+    let parsed = info(&buf)?;
+    if parsed.file_len() != Some(buf.len() as u64) {
+        return Err(Error::invalid(format!(
+            "farbfeld: body size mismatch — file has {} bytes, header announces {:?}",
+            buf.len(),
+            parsed.file_len()
+        )));
+    }
     let mut params = CodecParameters::video(CodecId::new(crate::CODEC_ID_STR));
     params.width = Some(parsed.width);
     params.height = Some(parsed.height);

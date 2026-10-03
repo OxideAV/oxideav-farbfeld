@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(deprecated)] // the pre-contract whole-file encoders stay fuzzed for their one deprecated release
 
 //! Encode-side fuzz harness for `oxideav-farbfeld`.
 //!
@@ -54,7 +55,7 @@
 //!    byte stream identical to [`encode_farbfeld_image`]. Drift
 //!    would silently break callers that pick the streaming path.
 //! 4. **Lossless roundtrip.** [`parse_farbfeld`] of the encoded
-//!    stream returns a [`FarbfeldImage`] whose `(width, height,
+//!    stream returns a [`Rgba16Image`] whose `(width, height,
 //!    pixels)` equals the input. This is the spec's primary
 //!    guarantee — the format is uncompressed and bijective.
 //! 5. **Exact size.** The encoded stream is exactly
@@ -81,7 +82,7 @@
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    FarbfeldImage, FarbfeldStreamWriter, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    Rgba16Image, FarbfeldStreamWriter, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
 };
 
 /// Maximum width / height drawn from the fuzz bytes. 64×64 caps the
@@ -139,10 +140,10 @@ fuzz_target!(|data: &[u8]| {
     for px in &pixels_native {
         samples_flat.extend_from_slice(px);
     }
-    let image_in = FarbfeldImage {
+    let image_in = Rgba16Image {
         width,
         height,
-        pixels: samples_flat.clone(),
+        data: samples_flat.clone(),
     };
     let encoded_c = encode_farbfeld_image(&image_in)
         .expect("encode_farbfeld_image must accept any matched-count flat plane");
@@ -224,7 +225,7 @@ fuzz_target!(|data: &[u8]| {
         parsed.height,
     );
     assert_eq!(
-        parsed.pixels, samples_flat,
+        parsed.data, samples_flat,
         "roundtrip pixels drifted at {width}×{height}",
     );
 

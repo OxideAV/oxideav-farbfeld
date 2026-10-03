@@ -13,7 +13,7 @@
 //! 3. `encode_from_rgba16`      — `encode_farbfeld_from_rgba16`
 //!    (native-endian RGBA, per-channel BE swap on emit).
 //! 4. `encode_image`            — `encode_farbfeld_image` (flat `[u16]`
-//!    plane via `FarbfeldImage`).
+//!    plane via `Rgba16Image`).
 //! 5. `stream_read_all_rows`    — `FarbfeldStreamReader::read_all_rows`
 //!    against an `std::io::Cursor`-backed body.
 //! 6. `stream_write_all_rows`   — `FarbfeldStreamWriter::write_row`
@@ -73,14 +73,15 @@
 //! `Throughput::Bytes(body_len)` so the report includes a MiB/s figure
 //! that's directly comparable across sizes.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use std::io::Cursor;
 
 use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    peek_farbfeld_dimensions, FarbfeldImage, FarbfeldStreamReader, FarbfeldStreamWriter,
-    HEADER_LEN,
+    peek_farbfeld_dimensions, FarbfeldStreamReader, FarbfeldStreamWriter, Rgba16Image, HEADER_LEN,
 };
 
 /// Image sizes covered by every group. The 4 MiB top end is large
@@ -111,7 +112,7 @@ fn pattern_pixels(width: u32, height: u32) -> Vec<[u16; 4]> {
 }
 
 /// Flatten the `[[u16; 4]]` pixel plane into a flat row-major `Vec<u16>`
-/// suitable for `FarbfeldImage`.
+/// suitable for `Rgba16Image`.
 fn pattern_samples_flat(pixels: &[[u16; 4]]) -> Vec<u16> {
     let mut out = Vec::with_capacity(pixels.len() * 4);
     for px in pixels {
@@ -205,12 +206,12 @@ fn bench_encode_image(c: &mut Criterion) {
     for &(w, h) in SIZES {
         let pixels = pattern_pixels(w, h);
         let samples = pattern_samples_flat(&pixels);
-        let img = FarbfeldImage {
+        let img = Rgba16Image {
             width: w,
             height: h,
-            pixels: samples,
+            data: samples,
         };
-        g.throughput(Throughput::Bytes((img.pixels.len() * 2) as u64));
+        g.throughput(Throughput::Bytes((img.data.len() * 2) as u64));
         g.bench_with_input(
             BenchmarkId::from_parameter(format!("{w}x{h}")),
             &img,

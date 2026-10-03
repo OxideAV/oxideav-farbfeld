@@ -24,14 +24,19 @@
 //! The header carries two `u32` dimensions. A maliciously-crafted file
 //! can declare `width = height = u32::MAX / 2` while shipping only the
 //! 16-byte header. To prevent that turning into a multi-gigabyte
-//! [`Vec`] allocation, [`parse_farbfeld`] cross-checks the announced
-//! `width * height * 8` body length against the **actual** number of
-//! body bytes available **before** allocating the decoded pixel buffer.
-//! Any mismatch is reported as [`FarbfeldError::InvalidData`] without
-//! attempting to allocate the announced-but-absent body capacity.
+//! [`Vec`] allocation, the whole-file decode ([`crate::decode_with`] and
+//! friends) first checks the [`crate::DecodeOptions`] limits against the
+//! header, then cross-checks the announced `width * height * 8` body
+//! length against the **actual** number of body bytes available —
+//! both **before** allocating the decoded pixel buffer. A limit trips
+//! [`FarbfeldError::LimitExceeded`]; a mismatch is reported as
+//! [`FarbfeldError::InvalidData`] without attempting to allocate the
+//! announced-but-absent body capacity.
 
 use crate::error::{FarbfeldError, Result};
-use crate::image::FarbfeldImage;
+use crate::image::{FarbfeldImage, PixelFormat, Plane};
+use crate::options::DecodeOptions;
+use crate::rgba16::Rgba16Image;
 
 /// Magic bytes that prefix every farbfeld file: ASCII `"farbfeld"`.
 pub const MAGIC: &[u8; 8] = b"farbfeld";
@@ -44,10 +49,10 @@ pub const BYTES_PER_PIXEL: usize = 8;
 
 /// Decoded farbfeld header: dimensions plus the computed body length.
 ///
-/// Returned by [`parse_farbfeld_header`] for callers that want to
-/// inspect the dimensions before committing to a full in-memory parse
-/// (e.g. to refuse images larger than a per-application sandbox cap, or
-/// to choose between [`parse_farbfeld`] and the streaming reader).
+/// The raw header view used by the streaming reader
+/// ([`crate::FarbfeldStreamReader::header`]); the contract-shaped
+/// equivalent for callers of the root API is [`crate::ImageInfo`] (via
+/// [`crate::info`]), which converts with [`crate::ImageInfo::header`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FarbfeldHeader {
     /// Picture width in pixels, exactly as carried on disk.
@@ -60,10 +65,33 @@ pub struct FarbfeldHeader {
 }
 
 impl FarbfeldHeader {
+    /// The header for a `width × height` image. Returns
+    /// [`FarbfeldError::Unsupported`] when `width * height * 8`
+    /// overflows this host's `usize`.
+    pub fn new(width: u32, height: u32) -> Result<Self> {
+        let pixel_count = (width as usize)
+            .checked_mul(height as usize)
+            .ok_or_else(|| {
+                FarbfeldError::unsupported(format!(
+                    "farbfeld: width*height ({width} * {height}) overflows usize"
+                ))
+            })?;
+        let body_len = pixel_count.checked_mul(BYTES_PER_PIXEL).ok_or_else(|| {
+            FarbfeldError::unsupported(format!(
+                "farbfeld: pixel byte count ({pixel_count} * {BYTES_PER_PIXEL}) overflows usize"
+            ))
+        })?;
+        Ok(Self {
+            width,
+            height,
+            body_len,
+        })
+    }
+
     /// Total on-disk size of the farbfeld file this header announces,
     /// in bytes: `HEADER_LEN + body_len` = `16 + width * height * 8`.
     ///
-    /// Returns [`FarbfeldError::InvalidData`] in the degenerate case
+    /// Returns [`FarbfeldError::Unsupported`] in the degenerate case
     /// where `body_len` is so large that adding the 16-byte header
     /// overflows `usize` (only reachable on 32-bit hosts with
     /// `width * height` near `usize::MAX / 8`).
@@ -74,53 +102,29 @@ impl FarbfeldHeader {
     /// will deliver.
     pub fn total_len(&self) -> Result<usize> {
         HEADER_LEN.checked_add(self.body_len).ok_or_else(|| {
-            FarbfeldError::invalid("farbfeld: total file size overflows usize".to_string())
+            FarbfeldError::unsupported("farbfeld: total file size overflows usize".to_string())
         })
     }
 }
 
-/// Peek the 16-byte farbfeld header off the front of `bytes` without
-/// touching the body.
-///
-/// Convenience wrapper around [`parse_farbfeld_header`] that takes the
-/// whole file (or a prefix of it) and reads only the first
-/// [`HEADER_LEN`] bytes; the rest is ignored, so callers can pass a
-/// short prefix `&buf[..16]`, a `bytes` of arbitrary length, or even a
-/// memory-mapped large file without committing to a full parse.
-///
-/// Returns [`FarbfeldError::InvalidData`] for any of:
-/// * fewer than 16 header bytes;
-/// * the magic prefix is not literal ASCII `"farbfeld"`;
-/// * `width * height * 8` overflows `usize`.
-///
-/// The returned [`FarbfeldHeader`]'s [`FarbfeldHeader::total_len`]
-/// reports the exact on-disk file size the header announces, which
-/// callers can use to refuse over-large images before allocating the
-/// body. This function never inspects bytes past offset 15, so the
-/// "DoS hardening" body-mismatch check that [`parse_farbfeld`] runs
-/// **is not** run here — it's the caller's contract to verify the
-/// body length before committing further.
-pub fn peek_farbfeld_dimensions(bytes: &[u8]) -> Result<FarbfeldHeader> {
-    // `parse_farbfeld_header` already only reads the first 16 bytes;
-    // this entry point exists to give callers a name that documents
-    // the intent (peek, don't parse) and to keep the call site short.
-    parse_farbfeld_header(bytes)
+/// `true` when `bytes` starts with the 8-byte magic. Total,
+/// allocation-free.
+#[inline]
+pub(crate) fn has_magic(bytes: &[u8]) -> bool {
+    bytes.len() >= MAGIC.len() && &bytes[..MAGIC.len()] == MAGIC
 }
 
-/// Parse the 16-byte farbfeld header.
-///
-/// Validates the magic prefix and that `width * height * 8` does not
-/// overflow `usize`. Does **not** look at the body — callers can use
-/// [`FarbfeldHeader::body_len`] to size the body read or to reject an
-/// over-large image before committing to a buffer allocation.
-pub fn parse_farbfeld_header(header: &[u8]) -> Result<FarbfeldHeader> {
+/// Read the two dimensions off a 16-byte header prefix: magic and
+/// length are validated, nothing is computed from the dimensions (so
+/// this cannot fail on geometry — it is what [`crate::info`] uses).
+pub(crate) fn read_dimensions(header: &[u8]) -> Result<(u32, u32)> {
     if header.len() < HEADER_LEN {
         return Err(FarbfeldError::invalid(format!(
             "farbfeld: header truncated — got {} bytes, need at least {HEADER_LEN}",
             header.len()
         )));
     }
-    if &header[..8] != MAGIC {
+    if !has_magic(header) {
         return Err(FarbfeldError::invalid(format!(
             "farbfeld: bad magic {:?}, expected {:?}",
             &header[..8],
@@ -129,40 +133,24 @@ pub fn parse_farbfeld_header(header: &[u8]) -> Result<FarbfeldHeader> {
     }
     let width = u32::from_be_bytes([header[8], header[9], header[10], header[11]]);
     let height = u32::from_be_bytes([header[12], header[13], header[14], header[15]]);
-    let pixel_count = (width as usize)
-        .checked_mul(height as usize)
-        .ok_or_else(|| {
-            FarbfeldError::invalid(format!(
-                "farbfeld: width*height ({width} * {height}) overflows usize"
-            ))
-        })?;
-    let body_len = pixel_count.checked_mul(BYTES_PER_PIXEL).ok_or_else(|| {
-        FarbfeldError::invalid(format!(
-            "farbfeld: pixel byte count ({pixel_count} * {BYTES_PER_PIXEL}) overflows usize"
-        ))
-    })?;
-    Ok(FarbfeldHeader {
-        width,
-        height,
-        body_len,
-    })
+    Ok((width, height))
 }
 
-/// Parse a complete farbfeld byte stream into a [`FarbfeldImage`].
-///
-/// Returns [`FarbfeldError::InvalidData`] for any of:
-/// * fewer than 16 header bytes;
-/// * the magic prefix is not literal ASCII `"farbfeld"`;
-/// * `width * height * 8` overflows `usize` (only on 32-bit hosts with
-///   pathological dimensions);
-/// * the body length doesn't exactly equal `width * height * 8`.
-///
-/// The body length cross-check happens **before** the pixel buffer is
-/// allocated, so a crafted header announcing a multi-gigabyte body on
-/// a 17-byte file is rejected without first allocating gigabytes of
-/// pixel-buffer capacity. See the module-level "DoS hardening" note.
-pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
-    let header = parse_farbfeld_header(bytes)?;
+/// Parse the 16-byte farbfeld header into a [`FarbfeldHeader`]:
+/// [`read_dimensions`] plus the `usize` body-length computation.
+pub(crate) fn read_header(header: &[u8]) -> Result<FarbfeldHeader> {
+    let (width, height) = read_dimensions(header)?;
+    FarbfeldHeader::new(width, height)
+}
+
+/// Validate the header + limits + exact body length of a whole file and
+/// return its header. The order matters: limits are checked before the
+/// `usize` geometry computation so a hostile header fails with
+/// `LimitExceeded` on every host, and both run before any allocation.
+pub(crate) fn validate_whole_file(bytes: &[u8], opts: &DecodeOptions) -> Result<FarbfeldHeader> {
+    let (width, height) = read_dimensions(bytes)?;
+    opts.check(width, height)?;
+    let header = FarbfeldHeader::new(width, height)?;
     let expected_total = header.total_len()?;
     if bytes.len() != expected_total {
         return Err(FarbfeldError::invalid(format!(
@@ -173,14 +161,37 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
             header.height,
         )));
     }
+    Ok(header)
+}
 
-    // Body length matches the header; safe to allocate the pixel buffer
-    // at full capacity. Each pixel is 4 u16 samples, 8 bytes on disk.
-    //
+/// The whole-file decode behind [`crate::decode_with`]: one packed
+/// `Rgba64Le` plane, the big-endian wire samples byte-swapped to
+/// little-endian in a single pass.
+pub(crate) fn decode_with(bytes: &[u8], opts: &DecodeOptions) -> Result<FarbfeldImage> {
+    let header = validate_whole_file(bytes, opts)?;
+    // Body length matches the header; safe to allocate the plane at
+    // full size. `swap_pairs` is the SIMD-friendly pairwise byte swap
+    // shared with the encoder (BE ↔ LE is its own inverse).
+    let body = &bytes[HEADER_LEN..];
+    let mut plane = vec![0u8; header.body_len];
+    crate::encoder::swap_pairs(body, &mut plane);
+    FarbfeldImage::new(
+        header.width,
+        header.height,
+        PixelFormat::Rgba64Le,
+        vec![Plane::new(header.width as usize * BYTES_PER_PIXEL, plane)],
+    )
+}
+
+/// The whole-file decode behind [`crate::decode_rgba16`]: native-endian
+/// `u16` samples, decoded straight from the wire without going through
+/// the byte plane.
+pub(crate) fn decode_rgba16_with(bytes: &[u8], opts: &DecodeOptions) -> Result<Rgba16Image> {
+    let header = validate_whole_file(bytes, opts)?;
     // Hot path: instead of `push`-ing one u16 at a time inside an
     // index-and-decode loop (which the optimiser tends not to vectorise
     // because of the in-bounds proof on each `body[off]`), allocate the
-    // sample buffer up front with `resize` and walk it in lockstep with
+    // sample buffer up front and walk it in lockstep with
     // `body.chunks_exact(2)`. The compiler then sees two `&[u8; 2]`-
     // shaped slices joined by `zip` and can hoist the `from_be_bytes`
     // into a single 16-bit byte-swap per pair, which the auto-vectoriser
@@ -188,25 +199,62 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<FarbfeldImage> {
     // contemporary x86_64 / aarch64).
     let body = &bytes[HEADER_LEN..];
     let sample_count = header.body_len / 2;
-    let mut pixels = vec![0u16; sample_count];
-    decode_be_samples(body, &mut pixels);
-
-    Ok(FarbfeldImage {
+    let mut data = vec![0u16; sample_count];
+    decode_be_samples(body, &mut data);
+    Ok(Rgba16Image {
         width: header.width,
         height: header.height,
-        pixels,
+        data,
     })
+}
+
+/// Peek the 16-byte farbfeld header off the front of `bytes` without
+/// touching the body.
+///
+/// Pre-contract name; [`crate::info`] is the contract equivalent (and
+/// cannot fail on geometry — use [`crate::ImageInfo::header`] for the
+/// `usize` view). Same validation as before: fewer than 16 bytes or a
+/// wrong magic is [`FarbfeldError::InvalidData`]; a `width * height *
+/// 8` that overflows `usize` is now [`FarbfeldError::Unsupported`].
+#[deprecated(note = "use oxideav_farbfeld::info (IMAGE_CRATE_API)")]
+pub fn peek_farbfeld_dimensions(bytes: &[u8]) -> Result<FarbfeldHeader> {
+    read_header(bytes)
+}
+
+/// Parse the 16-byte farbfeld header.
+///
+/// Pre-contract name for the same header read as
+/// [`peek_farbfeld_dimensions`]; [`crate::info`] is the contract
+/// equivalent.
+#[deprecated(note = "use oxideav_farbfeld::info (IMAGE_CRATE_API)")]
+pub fn parse_farbfeld_header(header: &[u8]) -> Result<FarbfeldHeader> {
+    read_header(header)
+}
+
+/// Parse a complete farbfeld byte stream into native-endian 16-bit
+/// samples.
+///
+/// Pre-contract entry point: the same decode as
+/// [`crate::decode_rgba16`] with every [`DecodeOptions`] limit lifted
+/// (the pre-contract behaviour), returning the sample view
+/// [`Rgba16Image`] (the type the old `FarbfeldImage` was; the name now
+/// denotes the contract image). Use [`crate::decode`] for the contract
+/// image or [`crate::decode_rgba16`] for this view with the default
+/// 1 GiB cap.
+#[deprecated(note = "use oxideav_farbfeld::decode / decode_rgba16 (IMAGE_CRATE_API)")]
+pub fn parse_farbfeld(bytes: &[u8]) -> Result<Rgba16Image> {
+    decode_rgba16_with(bytes, &DecodeOptions::default().unlimited())
 }
 
 /// Decode `body` (a `2 * out.len()`-byte big-endian u16 plane) into
 /// `out`'s slots, in lockstep.
 ///
-/// Factored out so [`parse_farbfeld`] and the streaming reader can share
-/// the same hot loop. The shape — `chunks_exact(2)` zipped with a
-/// `&mut [u16]` — is the one the auto-vectoriser picks up; per-iteration
-/// bounds proofs are discharged by `chunks_exact`'s static length, so
-/// the inner body collapses to `u16::from_be_bytes` on a `[u8; 2]` slot
-/// and a single store.
+/// Factored out so the whole-file sample decode and the streaming reader
+/// can share the same hot loop. The shape — `chunks_exact(2)` zipped
+/// with a `&mut [u16]` — is the one the auto-vectoriser picks up;
+/// per-iteration bounds proofs are discharged by `chunks_exact`'s static
+/// length, so the inner body collapses to `u16::from_be_bytes` on a
+/// `[u8; 2]` slot and a single store.
 ///
 /// Caller's contract: `body.len() == out.len() * 2`. The function will
 /// only fill min(out.len(), body.len() / 2) slots if the contract is
@@ -221,6 +269,7 @@ pub(crate) fn decode_be_samples(body: &[u8], out: &mut [u16]) {
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
 
@@ -272,7 +321,7 @@ mod tests {
         let img = parse_farbfeld(&buf).unwrap();
         assert_eq!(img.width, 1);
         assert_eq!(img.height, 1);
-        assert_eq!(img.pixels, [0x1234, 0x5678, 0x9ABC, 0xDEF0]);
+        assert_eq!(img.data, [0x1234, 0x5678, 0x9ABC, 0xDEF0]);
     }
 
     #[test]
@@ -284,7 +333,7 @@ mod tests {
         let img = parse_farbfeld(&buf).unwrap();
         assert_eq!(img.width, 0);
         assert_eq!(img.height, 0);
-        assert!(img.pixels.is_empty());
+        assert!(img.data.is_empty());
     }
 
     #[test]
@@ -321,7 +370,9 @@ mod tests {
             body_len: usize::MAX,
         };
         let err = h.total_len().unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::Unsupported(s) = err else {
+            panic!("expected Unsupported, got {err:?}");
+        };
         assert!(s.contains("overflow"), "msg = {s:?}");
     }
 
@@ -449,10 +500,10 @@ mod tests {
         for y in 0..h {
             for x in 0..w {
                 let base = ((y * w + x) * 4) as usize;
-                assert_eq!(img.pixels[base], (y * w + x) as u16);
-                assert_eq!(img.pixels[base + 1], 0);
-                assert_eq!(img.pixels[base + 2], 0);
-                assert_eq!(img.pixels[base + 3], 0);
+                assert_eq!(img.data[base], (y * w + x) as u16);
+                assert_eq!(img.data[base + 1], 0);
+                assert_eq!(img.data[base + 2], 0);
+                assert_eq!(img.data[base + 3], 0);
             }
         }
     }

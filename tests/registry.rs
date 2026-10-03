@@ -6,6 +6,7 @@
 //! matches the original byte stream.
 
 #![cfg(feature = "registry")]
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
 
 use std::io::Cursor;
 
@@ -14,9 +15,7 @@ use oxideav_core::{
     StreamInfo, TimeBase, VideoFrame, VideoPlane,
 };
 
-use oxideav_farbfeld::{
-    container, decoder::make_decoder, encoder_trait::make_encoder, register, CODEC_ID_STR,
-};
+use oxideav_farbfeld::{container, make_decoder, make_encoder, register_registries, CODEC_ID_STR};
 
 fn build_reference(width: u32, height: u32) -> Vec<u8> {
     // Mirror the make_test_pixels helper from roundtrip.rs.
@@ -40,7 +39,7 @@ fn build_reference(width: u32, height: u32) -> Vec<u8> {
 fn register_populates_codec_and_container_registries() {
     let mut codecs = oxideav_core::CodecRegistry::new();
     let mut containers = ContainerRegistry::new();
-    register(&mut codecs, &mut containers);
+    register_registries(&mut codecs, &mut containers);
 
     let codec_id = CodecId::new(CODEC_ID_STR);
     assert!(
@@ -84,11 +83,14 @@ fn decoder_consumes_packet_emits_frame_in_rgba64le() {
         Frame::Video(v) => v,
         _ => panic!("expected video frame"),
     };
-    assert_eq!(vf.planes.len(), 1);
+    // One image plane; the colour-signal side-channel (the crate's sRGB
+    // convention) rides along as a non-image plane.
+    assert_eq!(vf.image_plane_count(), 1);
     assert_eq!(vf.planes[0].stride, 2 * 8);
     assert_eq!(vf.planes[0].data.len(), 2 * 2 * 8);
     // First pixel is i=0 → all zeroes.
     assert_eq!(&vf.planes[0].data[..8], &[0u8; 8]);
+    assert!(vf.color_signal().is_some());
 }
 
 #[test]
@@ -152,9 +154,9 @@ fn encoder_handles_padded_stride() {
     let parsed = oxideav_farbfeld::parse_farbfeld(&pkt.data).unwrap();
     assert_eq!(parsed.width, 2);
     assert_eq!(parsed.height, 2);
-    assert_eq!(&parsed.pixels[..4], &[0xFFFFu16, 0, 0, 0xFFFF]);
+    assert_eq!(&parsed.data[..4], &[0xFFFFu16, 0, 0, 0xFFFF]);
     // Pixels 1..3 are zero (we never wrote them).
-    assert_eq!(&parsed.pixels[4..], &[0u16; 12]);
+    assert_eq!(&parsed.data[4..], &[0u16; 12]);
 }
 
 #[test]
@@ -178,9 +180,13 @@ fn encoder_rejects_plane_too_short_for_declared_dimensions() {
 
     let mut enc = make_encoder(&params).unwrap();
     let err = enc.send_frame(&frame).unwrap_err();
+    assert!(
+        matches!(err, oxideav_core::Error::InvalidData(_)),
+        "expected InvalidData, got {err:?}"
+    );
     let msg = format!("{err}");
     assert!(
-        msg.contains("too short"),
+        msg.contains("31 bytes") && msg.contains("needs 32"),
         "expected short-plane rejection, got: {msg}"
     );
 }

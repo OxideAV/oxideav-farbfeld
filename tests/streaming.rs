@@ -5,6 +5,8 @@
 //! produces bytes identical to the in-memory `encode_farbfeld_*` path
 //! and the `parse_farbfeld` decoder.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use std::io::Cursor;
 
 use oxideav_farbfeld::{
@@ -72,7 +74,7 @@ fn streaming_reader_output_equals_in_memory_parser_output() {
         // In-memory side.
         let parsed = parse_farbfeld(&bytes).unwrap();
 
-        assert_eq!(streamed, parsed.pixels, "streamed != parsed for {w}×{h}");
+        assert_eq!(streamed, parsed.data, "streamed != parsed for {w}×{h}");
     }
 }
 
@@ -149,7 +151,7 @@ fn streaming_reader_skip_rows_then_read_matches_in_memory_tail() {
     while reader.read_row(&mut row).unwrap() {
         tail.extend_from_slice(&row);
     }
-    assert_eq!(tail, full.pixels[row_samples * 9..]);
+    assert_eq!(tail, full.data[row_samples * 9..]);
 }
 
 #[test]

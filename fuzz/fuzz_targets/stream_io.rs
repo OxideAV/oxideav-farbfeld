@@ -1,4 +1,5 @@
 #![no_main]
+#![allow(deprecated)] // the pre-contract whole-file encoders stay fuzzed for their one deprecated release
 
 //! Streaming-I/O fuzz harness for `oxideav-farbfeld`.
 //!
@@ -74,7 +75,7 @@ use std::io::{self, Read, Write};
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    encode_farbfeld_image, parse_farbfeld, FarbfeldImage, FarbfeldStreamReader,
+    encode_farbfeld_image, parse_farbfeld, Rgba16Image, FarbfeldStreamReader,
     FarbfeldStreamWriter, BYTES_PER_PIXEL, HEADER_LEN,
 };
 
@@ -218,7 +219,7 @@ fuzz_target!(|data: &[u8]| {
     body_be[..take].copy_from_slice(&tail[..take]);
 
     // Native-endian flat samples derived from the BE body — the shape
-    // both `FarbfeldImage` and `FarbfeldStreamWriter::write_row` accept.
+    // both `Rgba16Image` and `FarbfeldStreamWriter::write_row` accept.
     let mut samples_native: Vec<u16> = Vec::with_capacity(sample_count);
     for c in body_be.chunks_exact(2) {
         samples_native.push(u16::from_be_bytes([c[0], c[1]]));
@@ -226,10 +227,10 @@ fuzz_target!(|data: &[u8]| {
     debug_assert_eq!(samples_native.len(), sample_count);
 
     // --- 1. Bulk-encode the reference stream -----------------------
-    let bulk_image = FarbfeldImage {
+    let bulk_image = Rgba16Image {
         width,
         height,
-        pixels: samples_native.clone(),
+        data: samples_native.clone(),
     };
     let bulk_encoded = encode_farbfeld_image(&bulk_image)
         .expect("encode_farbfeld_image must accept any matched-count flat plane");
@@ -282,7 +283,7 @@ fuzz_target!(|data: &[u8]| {
 
     // --- Invariant 2: chunked decode == bulk decode ----------------
     assert_eq!(
-        chunked_decoded, bulk_decoded.pixels,
+        chunked_decoded, bulk_decoded.data,
         "chunked reader disagreed with bulk parse at {width}×{height}",
     );
 

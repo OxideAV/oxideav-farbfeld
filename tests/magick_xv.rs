@@ -10,6 +10,8 @@
 //! the suite still passes on machines that don't have ImageMagick
 //! installed. The fall-back is a runtime guard, not `#[ignore]`.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use std::io::Write;
 use std::process::{Command, Stdio};
 
@@ -84,7 +86,7 @@ fn our_encoder_decodes_through_magick() {
         flat.extend_from_slice(px);
     }
     assert_eq!(
-        parsed.pixels, flat,
+        parsed.data, flat,
         "magick round-trip must preserve every u16 sample exactly",
     );
 }
@@ -115,11 +117,11 @@ fn magick_encoded_image_decodes_through_us() {
     let parsed = parse_farbfeld(&ff_bytes).expect("our parser accepts magick output");
     assert_eq!(parsed.width, width);
     assert_eq!(parsed.height, height);
-    assert_eq!(parsed.pixels.len() as u32, width * height * 4);
+    assert_eq!(parsed.data.len() as u32, width * height * 4);
     // Alpha channel must be 0xFFFF for every pixel — PPM has no
     // alpha, magick fills it with opaque.
     for pixel_idx in 0..(width * height) as usize {
-        let alpha = parsed.pixels[pixel_idx * 4 + 3];
+        let alpha = parsed.data[pixel_idx * 4 + 3];
         assert_eq!(alpha, 0xFFFF, "pixel {pixel_idx} alpha = 0x{alpha:04X}");
     }
 }
@@ -150,9 +152,9 @@ fn magick_byte_exact_self_roundtrip_through_our_parser() {
 
     let pass1 = magick_run(&["farbfeld:-", "farbfeld:-"], &ours);
     let p1 = parse_farbfeld(&pass1).unwrap();
-    assert_eq!(p1.pixels, baseline.pixels);
+    assert_eq!(p1.data, baseline.data);
 
     let pass2 = magick_run(&["farbfeld:-", "farbfeld:-"], &pass1);
     let p2 = parse_farbfeld(&pass2).unwrap();
-    assert_eq!(p2.pixels, baseline.pixels);
+    assert_eq!(p2.data, baseline.data);
 }

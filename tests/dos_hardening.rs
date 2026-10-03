@@ -11,6 +11,8 @@
 //! about confirming the parser refuses the *intent* without first
 //! allocating the announced-but-absent body.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use oxideav_farbfeld::{
     parse_farbfeld, parse_farbfeld_header, FarbfeldError, FarbfeldStreamReader,
 };
@@ -36,7 +38,9 @@ fn parser_refuses_huge_header_announcement_without_allocating() {
     let t = std::time::Instant::now();
     let err = parse_farbfeld(&buf).expect_err("must refuse");
     let dt = t.elapsed();
-    let FarbfeldError::InvalidData(msg) = err;
+    let FarbfeldError::InvalidData(msg) = err else {
+        panic!("expected InvalidData, got {err:?}");
+    };
     assert!(msg.contains("body size mismatch"), "msg = {msg:?}");
     // Sanity: the rejection should be near-instant. Pick a generous
     // wall-clock budget to avoid flake under CI load while still
@@ -56,7 +60,9 @@ fn parser_refuses_overflow_dimensions_on_64bit() {
     // earlier; either way the parser must refuse.
     let buf = header_only(u32::MAX, u32::MAX);
     let err = parse_farbfeld(&buf).expect_err("must refuse");
-    let FarbfeldError::InvalidData(msg) = err;
+    let FarbfeldError::Unsupported(msg) = err else {
+        panic!("expected Unsupported, got {err:?}");
+    };
     assert!(msg.contains("overflow"), "msg = {msg:?}");
 }
 
@@ -83,7 +89,9 @@ fn header_decoder_still_validates_magic() {
 fn header_decoder_rejects_overflow_dimensions() {
     let buf = header_only(u32::MAX, u32::MAX);
     let err = parse_farbfeld_header(&buf).expect_err("overflows usize");
-    let FarbfeldError::InvalidData(msg) = err;
+    let FarbfeldError::Unsupported(msg) = err else {
+        panic!("expected Unsupported, got {err:?}");
+    };
     assert!(msg.contains("overflow"), "msg = {msg:?}");
 }
 
@@ -103,7 +111,9 @@ fn stream_read_all_rows_refuses_huge_header_without_allocating() {
         .read_all_rows()
         .expect_err("must refuse: body absent");
     let dt = t.elapsed();
-    let FarbfeldError::InvalidData(msg) = err;
+    let FarbfeldError::InvalidData(msg) = err else {
+        panic!("expected InvalidData, got {err:?}");
+    };
     assert!(
         msg.contains("truncated") || msg.contains("short"),
         "msg = {msg:?}"
@@ -146,7 +156,9 @@ fn stream_read_all_rows_overflow_dimensions_refused() {
         let err = reader
             .read_all_rows()
             .expect_err("overflow must be refused");
-        let FarbfeldError::InvalidData(msg) = err;
+        let FarbfeldError::InvalidData(msg) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(msg.contains("overflow"), "msg = {msg:?}");
     }
 }

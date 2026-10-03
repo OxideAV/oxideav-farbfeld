@@ -11,9 +11,11 @@
 //! * confirm parser rejects every malformed input variant the spec
 //!   admits as a failure mode.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use oxideav_farbfeld::{
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    FarbfeldImage, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    Rgba16Image, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
 };
 
 /// Build a synthetic farbfeld file by hand — the parser/encoder under
@@ -63,7 +65,7 @@ fn parser_decodes_synthesised_reference_byte_exact() {
     for px in &pixels {
         expected_flat.extend_from_slice(px);
     }
-    assert_eq!(img.pixels, expected_flat);
+    assert_eq!(img.data, expected_flat);
 }
 
 #[test]
@@ -144,12 +146,12 @@ fn parser_rejects_every_malformed_variant() {
 #[test]
 fn farbfeld_image_new_validates_buffer_length() {
     // Correct length succeeds.
-    assert!(FarbfeldImage::new(2, 3, vec![0u16; 24]).is_some());
+    assert!(Rgba16Image::new(2, 3, vec![0u16; 24]).is_ok());
     // Wrong length is rejected.
-    assert!(FarbfeldImage::new(2, 3, vec![0u16; 23]).is_none());
-    assert!(FarbfeldImage::new(2, 3, vec![0u16; 25]).is_none());
+    assert!(Rgba16Image::new(2, 3, vec![0u16; 23]).is_err());
+    assert!(Rgba16Image::new(2, 3, vec![0u16; 25]).is_err());
     // Zero dimension accepts zero-length buffer.
-    assert!(FarbfeldImage::new(0, 0, vec![]).is_some());
+    assert!(Rgba16Image::new(0, 0, vec![]).is_ok());
 }
 
 #[test]
@@ -169,5 +171,5 @@ fn known_byte_pattern_roundtrip() {
     let parsed = parse_farbfeld(&expected).unwrap();
     assert_eq!(parsed.width, 1);
     assert_eq!(parsed.height, 1);
-    assert_eq!(parsed.pixels, [0xFFFFu16, 0x0000, 0x0000, 0xFFFF]);
+    assert_eq!(parsed.data, [0xFFFFu16, 0x0000, 0x0000, 0xFFFF]);
 }

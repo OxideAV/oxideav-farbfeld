@@ -25,7 +25,7 @@
 //! **never panic**. When it accepts, the input is a well-formed farbfeld
 //! file, so:
 //! * the emitted plane is exactly `height` rows of `width*8` bytes;
-//! * the standalone `parse_farbfeld` agrees it is valid and reports the
+//! * the standalone `decode_rgba16` agrees it is valid and reports the
 //!   same dimensions;
 //! * feeding the produced frame straight back into the framework encoder
 //!   reproduces the original bytes exactly (farbfeld is lossless with one
@@ -53,9 +53,7 @@ use oxideav_core::{
     CodecId, CodecParameters, Frame, NullCodecResolver, Packet, PixelFormat, ReadSeek, TimeBase,
     VideoFrame, VideoPlane,
 };
-use oxideav_farbfeld::{
-    container, decoder::make_decoder, encoder_trait::make_encoder, parse_farbfeld, CODEC_ID_STR,
-};
+use oxideav_farbfeld::{container, decode_rgba16 as parse_farbfeld, make_decoder, make_encoder, CODEC_ID_STR};
 
 fuzz_target!(|data: &[u8]| {
     decode_surface(data);
@@ -74,7 +72,7 @@ fn decode_surface(data: &[u8]) {
     // bytes, in which case there is nothing further to assert here.
     if dec.send_packet(&pkt).is_err() {
         // A rejected packet must mean the whole-file parser also rejects.
-        // (Both share `parse_farbfeld`, so they cannot disagree, but the
+        // (Both share the standalone decode, so they cannot disagree, but the
         // demuxer's eager validation is fuzzed for the same verdict.)
         demuxer_rejects(data);
         return;
@@ -91,7 +89,11 @@ fn decode_surface(data: &[u8]) {
         .expect("framework decoder accepted bytes the whole-file parser rejected");
 
     let stride = (img.width as usize) * 8;
-    assert_eq!(frame.planes.len(), 1, "farbfeld decodes to a single plane");
+    assert_eq!(
+        frame.image_plane_count(),
+        1,
+        "farbfeld decodes to a single image plane (plus side-channels)"
+    );
     assert_eq!(frame.planes[0].stride, stride, "plane stride = width*8");
     assert_eq!(
         frame.planes[0].data.len(),

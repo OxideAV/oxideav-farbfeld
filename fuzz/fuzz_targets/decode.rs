@@ -21,14 +21,14 @@
 //! Surfaces exercised on every input:
 //!
 //! * [`parse_farbfeld`] — the whole-file decoder (the primary surface).
-//! * [`parse_farbfeld_header`] — the look-but-don't-allocate header peek.
+//! * [`info`] — the look-but-don't-allocate header read.
 //! * [`FarbfeldStreamReader`] — the row-at-a-time `io::Read` decoder,
 //!   driven over the same bytes; its result must agree with the
 //!   whole-file decoder on whether the input is valid.
 //!
 //! Roundtrip invariants checked on inputs that *do* parse:
 //!
-//! * `pixels.len() == width * height * 4` (the [`FarbfeldImage`]
+//! * `pixels.len() == width * height * 4` (the [`Rgba16Image`]
 //!   invariant);
 //! * re-encoding the decoded image reproduces the original bytes exactly
 //!   (farbfeld is lossless and has exactly one valid byte serialisation
@@ -40,14 +40,14 @@ use std::io::Cursor;
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    encode_farbfeld_from_rgba16, parse_farbfeld, parse_farbfeld_header, FarbfeldStreamReader,
+    decode_rgba16 as parse_farbfeld, encode_rgba16, info, EncodeOptions, FarbfeldStreamReader,
     HEADER_LEN,
 };
 
 fuzz_target!(|data: &[u8]| {
     // 1. The header peek must never panic and must never allocate the
     //    announced body (it only inspects the first 16 bytes).
-    let header = parse_farbfeld_header(data);
+    let header = info(data).and_then(|i| i.header());
 
     // 2. The whole-file decoder must never panic on arbitrary bytes.
     let parsed = parse_farbfeld(data);
@@ -58,7 +58,7 @@ fuzz_target!(|data: &[u8]| {
     match (&parsed, &streamed) {
         (Ok(img), Ok(rows)) => {
             assert_eq!(
-                &img.pixels, rows,
+                &img.data, rows,
                 "stream decode disagreed with whole-file decode on a valid input"
             );
         }
@@ -84,9 +84,9 @@ fuzz_target!(|data: &[u8]| {
         .and_then(|n| n.checked_mul(4))
         .expect("a successfully-parsed image cannot overflow its own sample count");
     assert_eq!(
-        img.pixels.len(),
+        img.data.len(),
         expected_samples,
-        "parsed FarbfeldImage violated pixels.len() == width*height*4 ({}x{})",
+        "parsed Rgba16Image violated pixels.len() == width*height*4 ({}x{})",
         img.width,
         img.height,
     );
@@ -110,12 +110,7 @@ fuzz_target!(|data: &[u8]| {
     // farbfeld is lossless with exactly one valid serialisation per
     // image, so re-encoding the decoded pixels must reproduce the input
     // byte-for-byte.
-    let rgba: Vec<[u16; 4]> = img
-        .pixels
-        .chunks_exact(4)
-        .map(|c| [c[0], c[1], c[2], c[3]])
-        .collect();
-    let reencoded = encode_farbfeld_from_rgba16(img.width, img.height, &rgba)
+    let reencoded = encode_rgba16(img.width, img.height, &img.data, &EncodeOptions::default())
         .expect("re-encoding a decoded image must succeed");
     assert_eq!(
         reencoded.as_slice(),

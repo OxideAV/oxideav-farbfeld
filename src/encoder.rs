@@ -1,23 +1,22 @@
 //! farbfeld byte-stream encoder.
 //!
-//! Mirror of [`crate::parser::parse_farbfeld`]: takes pixel data and
-//! emits the on-disk byte stream described in the workspace's own
-//! independent byte-layout description at
-//! `docs/image/farbfeld/farbfeld-format.md` — 8-byte ASCII magic,
-//! two big-endian `u32` dimensions, then `width * height` pixels of
-//! four big-endian `u16` samples in `R, G, B, A` order.
+//! Mirror of the parser: takes pixel data and emits the on-disk byte
+//! stream described in the workspace's own independent byte-layout
+//! description at `docs/image/farbfeld/farbfeld-format.md` — 8-byte
+//! ASCII magic, two big-endian `u32` dimensions, then `width * height`
+//! pixels of four big-endian `u16` samples in `R, G, B, A` order.
 //!
-//! Two entry points cover the two natural caller shapes:
-//! * [`encode_farbfeld`] — accepts a pre-serialised big-endian RGBA u16
-//!   plane (i.e. 8 bytes per pixel, raw on-disk layout). The encoder
-//!   prepends the magic + dimensions header and validates the body
-//!   length; no per-sample byte swap.
-//! * [`encode_farbfeld_from_rgba16`] — accepts native-endian
-//!   `[u16; 4]`-per-pixel and performs the big-endian conversion.
+//! The contract entry points live at the crate root ([`crate::encode`]
+//! from a [`FarbfeldImage`], [`crate::encode_rgba16`] from native-endian
+//! samples, [`crate::encode_rgb8`] / [`crate::encode_rgba8`] from 8-bit
+//! input); this module holds their whole-file cores, the shared
+//! SIMD-friendly byte-swap helpers, and the deprecated pre-contract
+//! names.
 
 use crate::error::{FarbfeldError, Result};
 use crate::image::FarbfeldImage;
-use crate::parser::{BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
+use crate::parser::{FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
+use crate::rgba16::Rgba16Image;
 
 /// Serialise a flat row-major plane of native-endian `u16` samples
 /// (`R, G, B, A` repeated per pixel) into a big-endian byte body
@@ -59,7 +58,6 @@ pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
 /// Only the framework `Decoder` consumes this, so it is gated behind the
 /// `registry` feature — a standalone (`oxideav-core`-free) build never
 /// produces an `Rgba64Le` plane and would see it as dead code.
-#[cfg(feature = "registry")]
 #[inline]
 pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
     for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
@@ -92,9 +90,8 @@ pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
 /// Only the framework `Encoder` consumes this, so it is gated behind the
 /// `registry` feature — a standalone build never sees an `Rgba64Le`
 /// plane and would flag it as dead code.
-#[cfg(feature = "registry")]
 #[inline]
-pub(crate) fn swap_pairs_le_to_be(src: &[u8], dst: &mut [u8]) {
+pub(crate) fn swap_pairs(src: &[u8], dst: &mut [u8]) {
     for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
         // LE [lo, hi] -> BE [hi, lo].
         d[0] = s[1];
@@ -102,51 +99,88 @@ pub(crate) fn swap_pairs_le_to_be(src: &[u8], dst: &mut [u8]) {
     }
 }
 
-/// Encode a farbfeld file from a raw, already-big-endian RGBA u16 body
-/// plane.
-///
-/// `rgba_u16_be` must be exactly `width * height * 8` bytes long: each
-/// pixel is four 16-bit channels, big-endian, in `R, G, B, A` order. No
-/// per-sample byte swap is performed; the body is concatenated to the
-/// header verbatim.
-///
-/// Returns [`FarbfeldError::InvalidData`] if the body length doesn't
-/// match the announced dimensions.
-pub fn encode_farbfeld(width: u32, height: u32, rgba_u16_be: &[u8]) -> Result<Vec<u8>> {
-    let pixel_count = (width as usize)
-        .checked_mul(height as usize)
-        .ok_or_else(|| {
-            FarbfeldError::invalid(format!(
-                "farbfeld: width*height ({width} * {height}) overflows usize"
-            ))
-        })?;
-    let body_len = pixel_count.checked_mul(BYTES_PER_PIXEL).ok_or_else(|| {
-        FarbfeldError::invalid(format!(
-            "farbfeld: pixel byte count ({pixel_count} * {BYTES_PER_PIXEL}) overflows usize"
-        ))
-    })?;
-    if rgba_u16_be.len() != body_len {
-        return Err(FarbfeldError::invalid(format!(
-            "farbfeld: body length mismatch — caller passed {} bytes, header announces {} ({width}×{height} × {BYTES_PER_PIXEL})",
-            rgba_u16_be.len(),
-            body_len
-        )));
-    }
-
-    let mut out = vec![0u8; HEADER_LEN + body_len];
+/// Allocate a whole farbfeld file for `header` with the 16-byte header
+/// filled in and the body zeroed.
+#[inline]
+fn file_with_header(header: &FarbfeldHeader) -> Result<Vec<u8>> {
+    let total = header.total_len()?;
+    let mut out = vec![0u8; total];
     out[..8].copy_from_slice(MAGIC);
-    out[8..12].copy_from_slice(&width.to_be_bytes());
-    out[12..16].copy_from_slice(&height.to_be_bytes());
-    out[HEADER_LEN..].copy_from_slice(rgba_u16_be);
+    out[8..12].copy_from_slice(&header.width.to_be_bytes());
+    out[12..16].copy_from_slice(&header.height.to_be_bytes());
     Ok(out)
 }
 
-/// Convenience encoder that takes native-endian RGBA u16 pixels and
-/// performs the big-endian conversion.
+/// The whole-file encode behind [`crate::encode`]: the image's single
+/// `Rgba64Le` plane, byte-swapped row by row (stride padding skipped)
+/// into the big-endian wire body. The image's geometry was validated by
+/// its constructor, so this only fails on `usize` overflow.
+pub(crate) fn encode_image(image: &FarbfeldImage) -> Result<Vec<u8>> {
+    let header = FarbfeldHeader::new(image.width, image.height)?;
+    let mut out = file_with_header(&header)?;
+    let row_bytes = image.width as usize * BYTES_PER_PIXEL;
+    if row_bytes > 0 {
+        let stride = image.stride();
+        let src = image.as_bytes().unwrap_or(&[]);
+        for (y, dst) in out[HEADER_LEN..].chunks_exact_mut(row_bytes).enumerate() {
+            // The constructor proved every row is in bounds.
+            swap_pairs(&src[y * stride..y * stride + row_bytes], dst);
+        }
+    }
+    Ok(out)
+}
+
+/// The whole-file encode behind [`crate::encode_rgba16`]: native-endian
+/// samples straight to the big-endian wire, one pass.
+pub(crate) fn encode_rgba16_samples(width: u32, height: u32, samples: &[u16]) -> Result<Vec<u8>> {
+    let header = FarbfeldHeader::new(width, height)?;
+    let sample_count = header.body_len / 2;
+    if samples.len() != sample_count {
+        return Err(FarbfeldError::invalid(format!(
+            "farbfeld: {} samples passed, header announces {sample_count} ({width}×{height} × 4)",
+            samples.len()
+        )));
+    }
+    let mut out = file_with_header(&header)?;
+    encode_be_samples(samples, &mut out[HEADER_LEN..]);
+    Ok(out)
+}
+
+/// Header + an already big-endian body, verbatim.
+pub(crate) fn encode_be_body(width: u32, height: u32, body_be: &[u8]) -> Result<Vec<u8>> {
+    let header = FarbfeldHeader::new(width, height)?;
+    if body_be.len() != header.body_len {
+        return Err(FarbfeldError::invalid(format!(
+            "farbfeld: body length mismatch — caller passed {} bytes, header announces {} ({width}×{height} × {BYTES_PER_PIXEL})",
+            body_be.len(),
+            header.body_len
+        )));
+    }
+    let mut out = file_with_header(&header)?;
+    out[HEADER_LEN..].copy_from_slice(body_be);
+    Ok(out)
+}
+
+/// Encode a complete farbfeld file from a pre-serialised big-endian
+/// RGBA `u16` body (`width * height * 8` bytes, exactly).
 ///
-/// `pixels` must be exactly `width * height` entries; each
-/// `[r, g, b, a]` is written as four big-endian 16-bit samples to the
-/// output body.
+/// Pre-contract entry point. The contract path is [`crate::encode`]
+/// (from a [`FarbfeldImage`]) or [`crate::encode_rgba16`] (from
+/// native-endian samples); a caller holding wire-order bytes can also
+/// stream them through [`crate::FarbfeldStreamWriter::write_all_rows_raw`].
+#[deprecated(
+    note = "use oxideav_farbfeld::encode / encode_rgba16 or FarbfeldStreamWriter::write_all_rows_raw (IMAGE_CRATE_API)"
+)]
+pub fn encode_farbfeld(width: u32, height: u32, rgba_u16_be: &[u8]) -> Result<Vec<u8>> {
+    encode_be_body(width, height, rgba_u16_be)
+}
+
+/// Encode a complete farbfeld file from native-endian `[R, G, B, A]`
+/// `u16` quads (`width * height` of them, exactly).
+///
+/// Pre-contract entry point; [`crate::encode_rgba16`] takes the same
+/// samples as a flat `&[u16]`.
+#[deprecated(note = "use oxideav_farbfeld::encode_rgba16 (IMAGE_CRATE_API)")]
 pub fn encode_farbfeld_from_rgba16(
     width: u32,
     height: u32,
@@ -155,7 +189,7 @@ pub fn encode_farbfeld_from_rgba16(
     let pixel_count = (width as usize)
         .checked_mul(height as usize)
         .ok_or_else(|| {
-            FarbfeldError::invalid(format!(
+            FarbfeldError::unsupported(format!(
                 "farbfeld: width*height ({width} * {height}) overflows usize"
             ))
         })?;
@@ -165,84 +199,31 @@ pub fn encode_farbfeld_from_rgba16(
             pixels.len()
         )));
     }
-
-    let body_len = pixel_count * BYTES_PER_PIXEL;
-    let mut out = vec![0u8; HEADER_LEN + body_len];
-    out[..8].copy_from_slice(MAGIC);
-    out[8..12].copy_from_slice(&width.to_be_bytes());
-    out[12..16].copy_from_slice(&height.to_be_bytes());
-    // Reinterpret `pixels` as a flat `&[u16]` view of the body (each
-    // `[u16; 4]` pixel is four consecutive samples) so we can run the
-    // shared SIMD-friendly `encode_be_samples` loop over the whole plane
-    // in one pass instead of four `extend_from_slice` calls per pixel.
-    // `pixel_count * 4` cannot overflow because `pixel_count *
-    // BYTES_PER_PIXEL` (= 8 ×) already succeeded just above.
-    let flat: &[u16] = flatten_rgba_pixels(pixels);
-    encode_be_samples(flat, &mut out[HEADER_LEN..]);
-    Ok(out)
+    encode_rgba16_samples(width, height, flatten_rgba_pixels(pixels))
 }
 
-/// Encode a [`FarbfeldImage`] (native-endian flat plane) into the
-/// on-disk byte stream. Convenience wrapper over the two functions
-/// above for callers that already hold a [`FarbfeldImage`].
-pub fn encode_farbfeld_image(image: &FarbfeldImage) -> Result<Vec<u8>> {
-    let pixel_count = (image.width as usize)
-        .checked_mul(image.height as usize)
-        .ok_or_else(|| {
-            FarbfeldError::invalid(format!(
-                "farbfeld: width*height ({} * {}) overflows usize",
-                image.width, image.height
-            ))
-        })?;
-    let sample_count = pixel_count * 4;
-    if image.pixels.len() != sample_count {
-        return Err(FarbfeldError::invalid(format!(
-            "farbfeld: image.pixels has {} samples, header announces {sample_count} ({}×{} × 4)",
-            image.pixels.len(),
-            image.width,
-            image.height
-        )));
-    }
-
-    let body_len = pixel_count * BYTES_PER_PIXEL;
-    let mut out = vec![0u8; HEADER_LEN + body_len];
-    out[..8].copy_from_slice(MAGIC);
-    out[8..12].copy_from_slice(&image.width.to_be_bytes());
-    out[12..16].copy_from_slice(&image.height.to_be_bytes());
-    encode_be_samples(&image.pixels, &mut out[HEADER_LEN..]);
-    Ok(out)
+/// Encode a complete farbfeld file from a 16-bit sample view.
+///
+/// Pre-contract entry point (its parameter was the old `FarbfeldImage`,
+/// now [`Rgba16Image`]); [`crate::encode_rgba16`] or
+/// `encode(&FarbfeldImage::from(img), ..)` are the contract paths.
+#[deprecated(note = "use oxideav_farbfeld::encode / encode_rgba16 (IMAGE_CRATE_API)")]
+pub fn encode_farbfeld_image(image: &Rgba16Image) -> Result<Vec<u8>> {
+    encode_rgba16_samples(image.width, image.height, &image.data)
 }
 
-/// View a `&[[u16; 4]]` pixel plane as a flat `&[u16]` sample plane,
-/// in-place, with no allocation.
-///
-/// Lets [`encode_farbfeld_from_rgba16`] route through the same SIMD-
-/// friendly `encode_be_samples` helper that the streaming writer and
-/// `encode_farbfeld_image` use — without the helper, the `[[u16; 4]]`
-/// input shape would force a per-pixel inner loop the optimiser
-/// wouldn't vectorise.
-///
-/// The cast is sound because:
-/// * `[u16; 4]` is a packed array of four `u16` values; Rust guarantees
-///   no padding inside a `[T; N]`, and the array's alignment is
-///   `align_of::<u16>()`. A `u16` slice over the same bytes therefore
-///   aliases the same samples 1:1.
-/// * The returned slice's lifetime is tied to the input borrow, so the
-///   pixel buffer stays alive for the whole encode call.
-/// * `pixels.len() * 4` cannot overflow at the call sites here: the
-///   pixel-count cross-check in [`encode_farbfeld_from_rgba16`]
-///   already proved `pixel_count * BYTES_PER_PIXEL` (= 8 ×) didn't
-///   overflow, so the 4 × form can't either.
+/// View `[u16; 4]` quads as a flat `&[u16]` of four times the length.
 #[inline]
 fn flatten_rgba_pixels(pixels: &[[u16; 4]]) -> &[u16] {
-    // SAFETY: see the doc-comment above. `[u16; 4]`'s memory layout —
-    // four packed `u16` values, no niche, no discriminant, alignment of
-    // `u16` — is guaranteed by the language reference, so the resulting
-    // `&[u16]` of length `pixels.len() * 4` aliases the input bytes 1:1.
+    // SAFETY: `[u16; 4]`'s memory layout — four packed `u16` values, no
+    // niche, no discriminant, alignment of `u16` — is guaranteed by the
+    // language reference, so the resulting `&[u16]` of length
+    // `pixels.len() * 4` aliases the input bytes 1:1.
     unsafe { core::slice::from_raw_parts(pixels.as_ptr() as *const u16, pixels.len() * 4) }
 }
 
 #[cfg(test)]
+#[allow(deprecated)]
 mod tests {
     use super::*;
     use crate::parser::parse_farbfeld;
@@ -285,17 +266,17 @@ mod tests {
         assert_eq!(parsed.width, 2);
         assert_eq!(parsed.height, 1);
         assert_eq!(
-            parsed.pixels,
+            parsed.data,
             [0x1234, 0x5678, 0x9ABC, 0xDEF0, 0x0001, 0x0002, 0x0003, 0x0004]
         );
     }
 
     #[test]
     fn encode_image_round_trips_through_parser() {
-        let img = FarbfeldImage {
+        let img = Rgba16Image {
             width: 3,
             height: 2,
-            pixels: (0..(3 * 2 * 4)).map(|i| (i * 0x1111) as u16).collect(),
+            data: (0..(3 * 2 * 4)).map(|i| (i * 0x1111) as u16).collect(),
         };
         let bytes = encode_farbfeld_image(&img).unwrap();
         let parsed = parse_farbfeld(&bytes).unwrap();
@@ -403,12 +384,12 @@ mod tests {
 
     #[cfg(feature = "registry")]
     #[test]
-    fn swap_pairs_le_to_be_reverses_each_two_byte_pair() {
+    fn swap_pairs_reverses_each_two_byte_pair() {
         // LE [lo, hi] becomes BE [hi, lo] for every sample, and the
         // result equals reading the LE bytes as a u16 then writing it BE.
         let src = vec![0x34u8, 0x12, 0x78, 0x56, 0xBC, 0x9A, 0xF0, 0xDE];
         let mut dst = vec![0u8; src.len()];
-        swap_pairs_le_to_be(&src, &mut dst);
+        swap_pairs(&src, &mut dst);
         assert_eq!(dst, vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
         // Cross-check against the scalar from_le/to_be reference.
         for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact(2)) {
@@ -419,22 +400,22 @@ mod tests {
 
     #[cfg(feature = "registry")]
     #[test]
-    fn swap_pairs_le_to_be_is_its_own_inverse() {
+    fn swap_pairs_is_its_own_inverse() {
         // Applying the LE->BE swap twice restores the original bytes
         // (the transform is a pure pairwise byte reversal).
         let src: Vec<u8> = (0..256u16).flat_map(|v| v.to_le_bytes()).collect();
         let mut once = vec![0u8; src.len()];
-        swap_pairs_le_to_be(&src, &mut once);
+        swap_pairs(&src, &mut once);
         let mut twice = vec![0u8; src.len()];
-        swap_pairs_le_to_be(&once, &mut twice);
+        swap_pairs(&once, &mut twice);
         assert_eq!(twice, src);
     }
 
     #[cfg(feature = "registry")]
     #[test]
-    fn swap_pairs_le_to_be_zero_length_is_a_noop() {
+    fn swap_pairs_zero_length_is_a_noop() {
         let mut dst: [u8; 0] = [];
-        swap_pairs_le_to_be(&[], &mut dst);
+        swap_pairs(&[], &mut dst);
         assert!(dst.is_empty());
     }
 
@@ -482,10 +463,10 @@ mod tests {
         let h = 11u32;
         let sample_count = (w * h * 4) as usize;
         let pixels: Vec<u16> = (0..sample_count).map(|i| (i * 0x1111) as u16).collect();
-        let img = FarbfeldImage {
+        let img = Rgba16Image {
             width: w,
             height: h,
-            pixels: pixels.clone(),
+            data: pixels.clone(),
         };
         let fast = encode_farbfeld_image(&img).unwrap();
 

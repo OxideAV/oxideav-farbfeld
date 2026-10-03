@@ -21,10 +21,12 @@
 
 use std::io::{self, Read, Write};
 
-use crate::encoder::encode_be_samples;
+use crate::encoder::{encode_be_samples, swap_pairs};
 use crate::error::{FarbfeldError, Result};
+use crate::image::{FarbfeldImage, PixelFormat, Plane};
+use crate::options::DecodeOptions;
 use crate::parser::{
-    decode_be_samples, parse_farbfeld_header, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    decode_be_samples, read_dimensions, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
 };
 
 /// Row-at-a-time farbfeld reader.
@@ -52,18 +54,25 @@ impl<R: Read> FarbfeldStreamReader<R> {
     /// Construct a streaming reader by consuming the 16-byte header
     /// from `inner`.
     ///
-    /// Returns [`FarbfeldError::InvalidData`] if the header is short,
-    /// the magic is wrong, or `width * height * 8` overflows `usize`.
+    /// Returns [`FarbfeldError::InvalidData`] if the header is short or
+    /// the magic is wrong, [`FarbfeldError::Unsupported`] if `width *
+    /// height * 8` overflows `usize`, and [`FarbfeldError::Io`] if the
+    /// reader fails.
     pub fn new(mut inner: R) -> Result<Self> {
-        let mut header_buf = [0u8; HEADER_LEN];
-        read_exact_to_invalid(&mut inner, &mut header_buf, "farbfeld: header")?;
-        let header = parse_farbfeld_header(&header_buf)?;
+        let (width, height) = read_header_from(&mut inner)?;
+        Self::from_dimensions(inner, width, height)
+    }
+
+    /// Wrap a reader positioned just past the 16-byte header, with the
+    /// dimensions already read (and limit-checked) by the caller.
+    fn from_dimensions(inner: R, width: u32, height: u32) -> Result<Self> {
+        let header = FarbfeldHeader::new(width, height)?;
         // Validate `width * 8` fits in `usize` but do NOT allocate it yet:
         // the per-row scratch buffer is grown lazily on the first
         // `read_row`, capped by the bytes the reader actually supplies.
         let row_bytes = (header.width as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or_else(|| FarbfeldError::invalid("farbfeld: row size overflows usize"))?;
+            .ok_or_else(|| FarbfeldError::unsupported("farbfeld: row size overflows usize"))?;
         Ok(Self {
             inner,
             header,
@@ -277,9 +286,7 @@ impl<R: Read> FarbfeldStreamReader<R> {
         let read = (&mut self.inner)
             .take(self.row_bytes as u64)
             .read_to_end(&mut self.row_buf)
-            .map_err(|e| {
-                FarbfeldError::invalid(format!("farbfeld stream: row body: io error: {e}"))
-            })?;
+            .map_err(FarbfeldError::Io)?;
         if read != self.row_bytes {
             return Err(FarbfeldError::invalid(format!(
                 "farbfeld stream: row body: truncated input ({} bytes wanted, {read} delivered)",
@@ -427,27 +434,32 @@ pub struct FarbfeldStreamWriter<W: Write> {
     width: u32,
     height: u32,
     rows_written: u32,
+    /// On-disk bytes per row (`width * 8`), validated at construction to
+    /// fit in `usize`.
+    row_bytes: usize,
     /// Reusable per-row scratch buffer (`width * 8` bytes of on-disk
-    /// big-endian samples).
+    /// big-endian samples), allocated on the first `write_row` — never
+    /// for a zero-height image, so a `u32::MAX`-wide empty image does
+    /// not cost a 32 GiB buffer.
     row_buf: Vec<u8>,
 }
 
 impl<W: Write> FarbfeldStreamWriter<W> {
     /// Construct a streaming writer, emitting the 16-byte header.
     ///
-    /// Returns [`FarbfeldError::InvalidData`] if `width * height * 8`
-    /// overflows `usize`, or the underlying writer rejects the header
-    /// bytes.
+    /// Returns [`FarbfeldError::Unsupported`] if `width * height * 8`
+    /// overflows `usize`, or [`FarbfeldError::Io`] if the underlying
+    /// writer rejects the header bytes.
     pub fn new(mut inner: W, width: u32, height: u32) -> Result<Self> {
         let row_bytes = (width as usize)
             .checked_mul(BYTES_PER_PIXEL)
-            .ok_or_else(|| FarbfeldError::invalid("farbfeld: row size overflows usize"))?;
+            .ok_or_else(|| FarbfeldError::unsupported("farbfeld: row size overflows usize"))?;
         // Cross-check the full body fits in `usize` too — keeps the
         // stream-writer's row-count loop honest on 32-bit hosts with
         // pathological dimensions.
         let _ = row_bytes
             .checked_mul(height as usize)
-            .ok_or_else(|| FarbfeldError::invalid("farbfeld: body size overflows usize"))?;
+            .ok_or_else(|| FarbfeldError::unsupported("farbfeld: body size overflows usize"))?;
         write_all_to_invalid(&mut inner, MAGIC, "farbfeld stream: magic")?;
         write_all_to_invalid(&mut inner, &width.to_be_bytes(), "farbfeld stream: width")?;
         write_all_to_invalid(&mut inner, &height.to_be_bytes(), "farbfeld stream: height")?;
@@ -456,8 +468,18 @@ impl<W: Write> FarbfeldStreamWriter<W> {
             width,
             height,
             rows_written: 0,
-            row_buf: vec![0u8; row_bytes],
+            row_bytes,
+            row_buf: Vec::new(),
         })
+    }
+
+    /// The per-row scratch buffer, sized to one on-disk row (allocated
+    /// on first use).
+    fn row_buf(&mut self) -> &mut [u8] {
+        if self.row_buf.len() != self.row_bytes {
+            self.row_buf.resize(self.row_bytes, 0);
+        }
+        &mut self.row_buf
     }
 
     /// Picture width in pixels.
@@ -498,11 +520,11 @@ impl<W: Write> FarbfeldStreamWriter<W> {
                 self.width,
             )));
         }
-        if !self.row_buf.is_empty() {
+        if self.row_bytes > 0 {
             // Vectorisable shared helper — `chunks_exact_mut(2)` zipped
             // with the input `row` lets the auto-vectoriser turn the
             // per-sample BE store into a SIMD bswap.
-            encode_be_samples(row, &mut self.row_buf);
+            encode_be_samples(row, self.row_buf());
             write_all_to_invalid(&mut self.inner, &self.row_buf, "farbfeld stream: row body")?;
         }
         self.rows_written += 1;
@@ -534,7 +556,7 @@ impl<W: Write> FarbfeldStreamWriter<W> {
                 self.height,
             )));
         }
-        let want = self.row_buf.len();
+        let want = self.row_bytes;
         if row.len() != want {
             return Err(FarbfeldError::invalid(format!(
                 "farbfeld stream: row in-slice has {} bytes, need {want} ({} × {BYTES_PER_PIXEL})",
@@ -626,7 +648,7 @@ impl<W: Write> FarbfeldStreamWriter<W> {
     /// fails mid-plane.
     pub fn write_all_rows_raw(mut self, body: &[u8]) -> Result<W> {
         let rows_remaining = self.height - self.rows_written;
-        let row_bytes = self.row_buf.len();
+        let row_bytes = self.row_bytes;
         let want = (rows_remaining as usize) * row_bytes;
         if body.len() != want {
             return Err(FarbfeldError::invalid(format!(
@@ -663,6 +685,18 @@ impl<W: Write> FarbfeldStreamWriter<W> {
     }
 }
 
+/// Read the 16-byte header off `r` and return its dimensions. A short
+/// read is [`FarbfeldError::InvalidData`] (truncated), any other read
+/// failure [`FarbfeldError::Io`].
+fn read_header_from(r: &mut impl Read) -> Result<(u32, u32)> {
+    let mut header_buf = [0u8; HEADER_LEN];
+    read_exact_to_invalid(r, &mut header_buf, "farbfeld: header")?;
+    read_dimensions(&header_buf)
+}
+
+/// `read_exact` with a premature end of input reported as
+/// [`FarbfeldError::InvalidData`] (a truncated file) and every other
+/// failure as [`FarbfeldError::Io`].
 fn read_exact_to_invalid(r: &mut impl Read, buf: &mut [u8], label: &str) -> Result<()> {
     match r.read_exact(buf) {
         Ok(()) => Ok(()),
@@ -670,13 +704,71 @@ fn read_exact_to_invalid(r: &mut impl Read, buf: &mut [u8], label: &str) -> Resu
             "{label}: truncated input ({} bytes wanted)",
             buf.len()
         ))),
-        Err(e) => Err(FarbfeldError::invalid(format!("{label}: io error: {e}"))),
+        Err(e) => Err(FarbfeldError::Io(e)),
     }
 }
 
-fn write_all_to_invalid(w: &mut impl Write, buf: &[u8], label: &str) -> Result<()> {
-    w.write_all(buf)
-        .map_err(|e| FarbfeldError::invalid(format!("{label}: io error: {e}")))
+/// `write_all` with failures surfaced as [`FarbfeldError::Io`].
+fn write_all_to_invalid(w: &mut impl Write, buf: &[u8], _label: &str) -> Result<()> {
+    w.write_all(buf).map_err(FarbfeldError::Io)
+}
+
+// ---------------------------------------------------------------------------
+// decode_from / encode_to cores
+// ---------------------------------------------------------------------------
+
+/// The streaming decode behind [`crate::decode_from`] /
+/// [`crate::decode_from_with`]: header, limits, then one `Rgba64Le`
+/// plane filled row by row through the streaming reader (each row read
+/// with the bounded `Read::take` discipline, then byte-swapped in
+/// place). The plane is allocated only after the limits passed; the
+/// reader stops after the announced body and does not look past it.
+pub(crate) fn decode_reader<R: Read>(mut r: R, opts: &DecodeOptions) -> Result<FarbfeldImage> {
+    let (width, height) = read_header_from(&mut r)?;
+    opts.check(width, height)?;
+    let mut reader = FarbfeldStreamReader::from_dimensions(r, width, height)?;
+    let row_bytes = reader.row_bytes;
+    let mut plane = vec![0u8; reader.header.body_len];
+    if row_bytes > 0 {
+        for dst in plane.chunks_exact_mut(row_bytes) {
+            if !reader.read_row_bytes()? {
+                break;
+            }
+            swap_pairs(&reader.row_buf, dst);
+            reader.rows_read += 1;
+        }
+    }
+    FarbfeldImage::new(
+        width,
+        height,
+        PixelFormat::Rgba64Le,
+        vec![Plane::new(width as usize * BYTES_PER_PIXEL, plane)],
+    )
+}
+
+/// The streaming encode behind [`crate::encode_to`]: header, then each
+/// row of the image's `Rgba64Le` plane byte-swapped into the writer's
+/// row buffer and written (stride padding skipped). Byte-identical to
+/// [`crate::encode`].
+pub(crate) fn encode_writer<W: Write>(image: &FarbfeldImage, w: W) -> Result<()> {
+    let mut writer = FarbfeldStreamWriter::new(w, image.width, image.height)?;
+    let row_bytes = writer.row_bytes;
+    let stride = image.stride();
+    let src = image.as_bytes().unwrap_or(&[]);
+    for y in 0..image.height as usize {
+        if row_bytes > 0 {
+            // The constructor proved every row is in bounds.
+            swap_pairs(&src[y * stride..y * stride + row_bytes], writer.row_buf());
+            write_all_to_invalid(
+                &mut writer.inner,
+                &writer.row_buf,
+                "farbfeld stream: row body",
+            )?;
+        }
+        writer.rows_written += 1;
+    }
+    writer.finish()?;
+    Ok(())
 }
 
 #[cfg(test)]
@@ -738,7 +830,9 @@ mod tests {
         assert!(reader.read_row(&mut row).is_ok());
         // Second row needs 16 more — none left. Truncated.
         let err = reader.read_row(&mut row).unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("truncated"), "msg = {s:?}");
     }
 
@@ -811,7 +905,9 @@ mod tests {
         writer.write_row(&row).unwrap();
         // Only 1 of 3 rows — finish must refuse.
         let err = writer.finish().unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("1 of 3"), "msg = {s:?}");
     }
 
@@ -897,7 +993,9 @@ mod tests {
         let writer = FarbfeldStreamWriter::new(Vec::new(), 2, 3).unwrap();
         let too_short = vec![0u16; 20];
         let err = writer.write_all_rows(&too_short).unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("need 24"), "msg = {s:?}");
     }
 
@@ -945,7 +1043,9 @@ mod tests {
         let writer = FarbfeldStreamWriter::new(Vec::new(), 3, 2).unwrap();
         let too_short = vec![0u8; 40];
         let err = writer.write_all_rows_raw(&too_short).unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("need 48"), "msg = {s:?}");
     }
 
@@ -1037,7 +1137,9 @@ mod tests {
         let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes)).unwrap();
         // First row needs 16 bytes; only 8 present — truncation.
         let err = reader.skip_row().unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("truncated"), "msg = {s:?}");
     }
 
@@ -1179,7 +1281,9 @@ mod tests {
         assert!(reader.read_row_raw(&mut row).is_ok());
         // Second row needs 16; none left — truncation.
         let err = reader.read_row_raw(&mut row).unwrap_err();
-        let FarbfeldError::InvalidData(s) = err;
+        let FarbfeldError::InvalidData(s) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(s.contains("truncated"), "msg = {s:?}");
     }
 
@@ -1396,7 +1500,7 @@ mod tests {
         // first row) and after a partial `read_row` drain (the
         // `prev_len != 0` mid-buffer growth path), across a width whose
         // row sample count is not a multiple of the SIMD lane width.
-        use crate::parse_farbfeld;
+        use crate::decode_rgba16 as parse_farbfeld;
 
         for &(w, h) in &[(1u32, 1u32), (3, 5), (7, 1), (1, 9), (13, 11)] {
             let mut samples = Vec::new();
@@ -1415,7 +1519,7 @@ mod tests {
             // Fresh reader: every row taken by `read_all_rows`.
             let mut reader = FarbfeldStreamReader::new(Cursor::new(bytes.clone())).unwrap();
             let all = reader.read_all_rows().unwrap();
-            assert_eq!(all, whole.pixels, "fresh read_all_rows mismatch at {w}x{h}");
+            assert_eq!(all, whole.data, "fresh read_all_rows mismatch at {w}x{h}");
 
             // Partial drain: consume the first row via `read_row` (when
             // there is one), then let `read_all_rows` grow the buffer from
@@ -1430,7 +1534,7 @@ mod tests {
                 let mut joined = first;
                 joined.extend_from_slice(&rest);
                 assert_eq!(
-                    joined, whole.pixels,
+                    joined, whole.data,
                     "partial-drain read_all_rows mismatch at {w}x{h}"
                 );
             }
@@ -1458,7 +1562,9 @@ mod tests {
         let t = std::time::Instant::now();
         let err = reader.read_all_rows().expect_err("no body — must refuse");
         let dt = t.elapsed();
-        let FarbfeldError::InvalidData(msg) = err;
+        let FarbfeldError::InvalidData(msg) = err else {
+            panic!("expected InvalidData, got {err:?}");
+        };
         assert!(msg.contains("truncated"), "msg = {msg:?}");
         assert!(
             dt < std::time::Duration::from_millis(500),

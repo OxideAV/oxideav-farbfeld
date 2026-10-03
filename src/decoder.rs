@@ -1,18 +1,17 @@
 //! `oxideav-core` `Decoder` trait implementation for farbfeld.
 //!
-//! Gated behind the `registry` feature. The decoder accepts one
-//! complete farbfeld file per packet and emits one [`oxideav_core::VideoFrame`]
-//! per packet. Pixels are converted from the on-disk big-endian layout
-//! to the framework canonical [`oxideav_core::PixelFormat::Rgba64Le`]
-//! (little-endian) so the resulting `VideoPlane.data` is ready to feed
-//! straight into image-conversion or display code without further byte
-//! shuffling.
+//! Gated behind the `registry` feature. A thin adapter over the
+//! standalone [`crate::decode`]: the decoder accepts one complete
+//! farbfeld file per packet and emits one [`VideoFrame`] per packet in
+//! the native `Rgba64Le` layout (the big-endian wire samples
+//! byte-swapped to little-endian), with the colour-signal side-channel
+//! carrying the crate's sRGB convention.
 
-use crate::encoder::encode_le_samples;
-use crate::parser::parse_farbfeld;
+use crate::image::FarbfeldImage;
+use crate::registry::image_into_video_frame;
 
 use oxideav_core::Decoder;
-use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame, VideoPlane};
+use oxideav_core::{CodecId, CodecParameters, Frame, Packet, VideoFrame};
 
 /// Factory registered with the codec registry. One packet per whole
 /// farbfeld file; one frame per packet.
@@ -36,29 +35,11 @@ impl Decoder for FarbfeldDecoder {
     }
 
     fn send_packet(&mut self, packet: &Packet) -> oxideav_core::Result<()> {
-        let image = parse_farbfeld(&packet.data)?;
-        // Convert native-endian u16 samples to the canonical little-endian
-        // byte layout expected by `PixelFormat::Rgba64Le`. Route through
-        // the crate's shared SIMD-friendly `encode_le_samples` helper —
-        // the same `iter().zip(chunks_exact_mut(2))` shape the
-        // auto-vectoriser lifts into a single store — rather than a
-        // per-sample `extend_from_slice` append, so the framework decode
-        // path matches the standalone parser/encoder hot loops.
-        let stride = (image.width as usize)
-            .checked_mul(8)
-            .ok_or_else(|| oxideav_core::Error::invalid("farbfeld: stride overflow"))?;
-        let body_len = stride
-            .checked_mul(image.height as usize)
-            .ok_or_else(|| oxideav_core::Error::invalid("farbfeld: plane size overflow"))?;
-        // `body_len == image.pixels.len() * 2` whenever the parser
-        // succeeded (pixels = width*height*4 samples, body = ×2 bytes);
-        // size the buffer to the on-disk body and fill it in one pass.
-        let mut data = vec![0u8; body_len];
-        encode_le_samples(&image.pixels, &mut data);
-        self.pending = Some(VideoFrame {
-            pts: packet.pts,
-            planes: vec![VideoPlane { stride, data }],
-        });
+        // The standalone contract path, default limits (1 GiB plane).
+        let image: FarbfeldImage = crate::api::decode(&packet.data)?;
+        // farbfeld carries no timestamp of its own; thread the
+        // surrounding `Packet`'s `pts` onto the produced frame.
+        self.pending = Some(image_into_video_frame(image, packet.pts));
         Ok(())
     }
 

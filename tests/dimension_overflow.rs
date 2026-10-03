@@ -56,6 +56,8 @@
 //! the random dimension pairs) so any failure is reproducible from the
 //! seed printed in the assertion message.
 
+#![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
+
 use oxideav_farbfeld::{
     parse_farbfeld, parse_farbfeld_header, peek_farbfeld_dimensions, FarbfeldError,
     BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
@@ -153,7 +155,7 @@ fn check_header_math(seed: u32, width: u32, height: u32) {
             );
 
             // (4) total_len consistency: either 16 + body_len exactly, or
-            //     a clean InvalidData when that sum overflows usize.
+            //     a clean Unsupported when that sum overflows usize.
             match h.total_len() {
                 Ok(total) => {
                     let expected = HEADER_LEN
@@ -165,7 +167,7 @@ fn check_header_math(seed: u32, width: u32, height: u32) {
                         h.body_len,
                     );
                 }
-                Err(FarbfeldError::InvalidData(msg)) => {
+                Err(FarbfeldError::Unsupported(msg)) => {
                     // The only legitimate reason to fail here is that
                     // 16 + body_len overflows usize.
                     assert!(
@@ -178,9 +180,12 @@ fn check_header_math(seed: u32, width: u32, height: u32) {
                         "seed={seed}: total_len overflow message should mention overflow, got {msg:?}",
                     );
                 }
+                Err(other) => {
+                    panic!("seed={seed}: total_len failed with {other:?}, expected Unsupported")
+                }
             }
         }
-        Err(FarbfeldError::InvalidData(msg)) => {
+        Err(FarbfeldError::Unsupported(msg)) => {
             // (3) The header parser only rejects a well-magic'd header
             //     when the size arithmetic overflows usize. The oracle
             //     proves overflow was genuine: width*height*8 really did
@@ -193,6 +198,9 @@ fn check_header_math(seed: u32, width: u32, height: u32) {
                 msg.contains("overflow"),
                 "seed={seed}: overflow rejection should mention overflow, got {msg:?}",
             );
+        }
+        Err(other) => {
+            panic!("seed={seed}: header parse failed with {other:?}, expected Unsupported")
         }
     }
 }
@@ -268,10 +276,13 @@ fn pathological_header_only_file_rejected_without_allocation() {
         let err = parse_farbfeld(&header).expect_err(
             "a 16-byte-only file announcing a multi-gigabyte body must be rejected, not parsed",
         );
-        let FarbfeldError::InvalidData(msg) = err;
-        // Whether the rejection is the overflow path (32-bit hosts) or the
-        // body-size-mismatch path (64-bit hosts), it must be an
-        // InvalidData with a descriptive message and must NOT have
+        let msg = match err {
+            FarbfeldError::InvalidData(msg) | FarbfeldError::Unsupported(msg) => msg,
+            other => panic!("expected InvalidData / Unsupported, got {other:?}"),
+        };
+        // Whether the rejection is the overflow path (Unsupported, 32-bit
+        // hosts) or the body-size-mismatch path (InvalidData, 64-bit
+        // hosts), it must carry a descriptive message and must NOT have
         // allocated the announced body to discover it.
         assert!(
             msg.contains("overflow") || msg.contains("mismatch"),
