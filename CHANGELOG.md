@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.0.5](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.4...v0.0.5) - 2026-10-04
+
+### Other
+
+- README examples use the current registry API
+- Fleet sweep: stop stamping the sRGB convention on registry frames
+- README + CHANGELOG: contract section order, 12 MP speed table, migration notes
+- exact round-trip property over random 16-bit images + 12 MP contract bench
+- image-crate API contract — probe/info/decode*/encode*, FarbfeldImage as the Rgba64Le contract image, deprecated pre-contract wrappers
+
 ### Changed
 
 - **Registry frames no longer carry the sRGB convention as a colour
