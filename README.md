@@ -31,6 +31,7 @@ if oxideav_farbfeld::probe(&bytes) {
     let out: Vec<u8> = oxideav_farbfeld::encode_rgba8(w, h, &rgba, &opts)?;
     std::fs::write("out.ff", out)?;
 }
+# Ok::<(), Box<dyn std::error::Error>>(())
 ```
 
 | Item | Signature |
@@ -72,8 +73,10 @@ The default `registry` feature pulls in `oxideav-core`:
 let mut ctx = oxideav_core::RuntimeContext::new();
 oxideav_farbfeld::register(&mut ctx);     // codec "farbfeld" + container (demux/mux/probe, .ff/.farbfeld)
 // or: register_codecs(&mut ctx.codecs) / register_containers(&mut ctx.containers)
+# let params = oxideav_core::CodecParameters::video(oxideav_core::CodecId::new("farbfeld"));
 let dec = oxideav_farbfeld::make_decoder(&params)?;   // oxideav_core::Decoder
 let enc = oxideav_farbfeld::make_encoder(&params)?;   // oxideav_core::Encoder
+# Ok::<(), oxideav_core::Error>(())
 ```
 
 `From<FarbfeldImage> for VideoFrame` (one packed `Rgba64Le` plane; a
