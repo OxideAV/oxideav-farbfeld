@@ -10,7 +10,7 @@
 use std::io::Cursor;
 
 use oxideav_farbfeld::{
-    encode_farbfeld_from_rgba16, parse_farbfeld, FarbfeldStreamReader, FarbfeldStreamWriter,
+    FarbfeldStreamReader, FarbfeldStreamWriter, encode_farbfeld_from_rgba16, parse_farbfeld,
 };
 
 /// Synthesise a deterministic flat RGBA u16 sample buffer of size
@@ -46,7 +46,7 @@ fn streaming_writer_output_equals_in_memory_encoder_output() {
 
         // In-memory side.
         let mut pixel_pairs: Vec<[u16; 4]> = Vec::with_capacity((w * h) as usize);
-        for chunk in samples.chunks_exact(4) {
+        for chunk in samples.as_chunks::<4>().0 {
             pixel_pairs.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         let in_memory = encode_farbfeld_from_rgba16(w, h, &pixel_pairs).unwrap();
@@ -60,7 +60,7 @@ fn streaming_reader_output_equals_in_memory_parser_output() {
     for &(w, h) in &[(1u32, 1u32), (3, 5), (16, 16), (64, 33)] {
         let samples = make_samples(w, h);
         let mut pixel_pairs: Vec<[u16; 4]> = Vec::with_capacity((w * h) as usize);
-        for chunk in samples.chunks_exact(4) {
+        for chunk in samples.as_chunks::<4>().0 {
             pixel_pairs.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
         }
         let bytes = encode_farbfeld_from_rgba16(w, h, &pixel_pairs).unwrap();
@@ -104,7 +104,7 @@ fn streaming_roundtrip_through_writer_then_reader() {
 
     // And bytes-on-disk must match the in-memory encoder.
     let mut pairs: Vec<[u16; 4]> = Vec::with_capacity((w * h) as usize);
-    for chunk in samples.chunks_exact(4) {
+    for chunk in samples.as_chunks::<4>().0 {
         pairs.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     let in_mem = encode_farbfeld_from_rgba16(w, h, &pairs).unwrap();
@@ -132,7 +132,7 @@ fn streaming_reader_skip_rows_then_read_matches_in_memory_tail() {
     let h = 16u32;
     let samples = make_samples(w, h);
     let mut pairs: Vec<[u16; 4]> = Vec::with_capacity((w * h) as usize);
-    for chunk in samples.chunks_exact(4) {
+    for chunk in samples.as_chunks::<4>().0 {
         pairs.push([chunk[0], chunk[1], chunk[2], chunk[3]]);
     }
     let bytes = encode_farbfeld_from_rgba16(w, h, &pairs).unwrap();

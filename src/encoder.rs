@@ -15,7 +15,7 @@
 
 use crate::error::{FarbfeldError, Result};
 use crate::image::FarbfeldImage;
-use crate::parser::{FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
+use crate::parser::{BYTES_PER_PIXEL, FarbfeldHeader, HEADER_LEN, MAGIC};
 use crate::rgba16::Rgba16Image;
 
 /// Serialise a flat row-major plane of native-endian `u16` samples
@@ -29,7 +29,7 @@ use crate::rgba16::Rgba16Image;
 /// (`PSHUFB`) and aarch64 (`REV16`).
 #[inline]
 pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
-    for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
+    for (sample, slot) in samples.iter().zip(out.as_chunks_mut::<2>().0.iter_mut()) {
         let be = sample.to_be_bytes();
         slot[0] = be[0];
         slot[1] = be[1];
@@ -60,7 +60,7 @@ pub(crate) fn encode_be_samples(samples: &[u16], out: &mut [u8]) {
 /// produces an `Rgba64Le` plane and would see it as dead code.
 #[inline]
 pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
-    for (sample, slot) in samples.iter().zip(out.chunks_exact_mut(2)) {
+    for (sample, slot) in samples.iter().zip(out.as_chunks_mut::<2>().0.iter_mut()) {
         let le = sample.to_le_bytes();
         slot[0] = le[0];
         slot[1] = le[1];
@@ -92,7 +92,12 @@ pub(crate) fn encode_le_samples(samples: &[u16], out: &mut [u8]) {
 /// plane and would flag it as dead code.
 #[inline]
 pub(crate) fn swap_pairs(src: &[u8], dst: &mut [u8]) {
-    for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact_mut(2)) {
+    for (s, d) in src
+        .as_chunks::<2>()
+        .0
+        .iter()
+        .zip(dst.as_chunks_mut::<2>().0.iter_mut())
+    {
         // LE [lo, hi] -> BE [hi, lo].
         d[0] = s[1];
         d[1] = s[0];
@@ -267,7 +272,9 @@ mod tests {
         assert_eq!(parsed.height, 1);
         assert_eq!(
             parsed.data,
-            [0x1234, 0x5678, 0x9ABC, 0xDEF0, 0x0001, 0x0002, 0x0003, 0x0004]
+            [
+                0x1234, 0x5678, 0x9ABC, 0xDEF0, 0x0001, 0x0002, 0x0003, 0x0004
+            ]
         );
     }
 
@@ -352,8 +359,8 @@ mod tests {
         assert_eq!(&bytes[2..4], &[0x01, 0x00]); // sample 1 -> [lo, hi]
         assert_eq!(&bytes[510..512], &[0xFF, 0x00]); // sample 255
         assert_eq!(&bytes[512..514], &[0x00, 0x01]); // sample 256
-                                                     // Round-trip: from_le_bytes reproduces every sample.
-        for (i, pair) in bytes.chunks_exact(2).enumerate() {
+        // Round-trip: from_le_bytes reproduces every sample.
+        for (i, pair) in bytes.as_chunks::<2>().0.iter().enumerate() {
             assert_eq!(u16::from_le_bytes([pair[0], pair[1]]), samples[i]);
         }
     }
@@ -368,7 +375,12 @@ mod tests {
         let mut le = vec![0u8; samples.len() * 2];
         encode_be_samples(&samples, &mut be);
         encode_le_samples(&samples, &mut le);
-        for (b, l) in be.chunks_exact(2).zip(le.chunks_exact(2)) {
+        for (b, l) in be
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(le.as_chunks::<2>().0.iter())
+        {
             assert_eq!(b[0], l[1]);
             assert_eq!(b[1], l[0]);
         }
@@ -392,7 +404,12 @@ mod tests {
         swap_pairs(&src, &mut dst);
         assert_eq!(dst, vec![0x12, 0x34, 0x56, 0x78, 0x9A, 0xBC, 0xDE, 0xF0]);
         // Cross-check against the scalar from_le/to_be reference.
-        for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact(2)) {
+        for (s, d) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dst.as_chunks::<2>().0.iter())
+        {
             let v = u16::from_le_bytes([s[0], s[1]]);
             assert_eq!([d[0], d[1]], v.to_be_bytes());
         }

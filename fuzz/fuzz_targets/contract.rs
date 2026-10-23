@@ -26,9 +26,9 @@ use std::io::Cursor;
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    decode, decode_from, decode_rgb8, decode_rgba16, decode_rgba8, decode_with, encode,
-    encode_rgb8, encode_rgba8, encode_to, info, probe, DecodeOptions, EncodeOptions,
-    FarbfeldError, PixelFormat,
+    DecodeOptions, EncodeOptions, FarbfeldError, PixelFormat, decode, decode_from, decode_rgb8,
+    decode_rgba8, decode_rgba16, decode_with, encode, encode_rgb8, encode_rgba8, encode_to, info,
+    probe,
 };
 
 fuzz_target!(|data: &[u8]| {
@@ -58,7 +58,9 @@ fuzz_target!(|data: &[u8]| {
         // trailing bytes (it stops after the announced body).
         if let Ok(s) = streamed {
             let i = info(data).expect("decode_from accepted bytes info rejected");
-            let announced = i.file_len().expect("decode_from accepted an unaddressable body");
+            let announced = i
+                .file_len()
+                .expect("decode_from accepted an unaddressable body");
             assert!(
                 (data.len() as u64) > announced,
                 "decode_from accepted an input decode rejected for a reason other than trailing bytes"
@@ -91,7 +93,9 @@ fuzz_target!(|data: &[u8]| {
     let expect_rgba: Vec<u8> = samples.data.iter().map(|v| (v >> 8) as u8).collect();
     assert_eq!(rgba8, expect_rgba);
     let expect_rgb: Vec<u8> = expect_rgba
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| p[..3].to_vec())
         .collect();
     assert_eq!(rgb8, expect_rgb);

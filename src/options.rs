@@ -87,27 +87,27 @@ impl DecodeOptions {
     /// is `width × height × 8` bytes; a product that overflows `u64`
     /// exceeds any finite byte limit.
     pub(crate) fn check(&self, width: u32, height: u32) -> Result<()> {
-        if let Some(m) = self.max_width {
-            if width > m {
-                return Err(FarbfeldError::limit(format!(
-                    "farbfeld: width {width} exceeds max_width {m}"
-                )));
-            }
+        if let Some(m) = self.max_width
+            && width > m
+        {
+            return Err(FarbfeldError::limit(format!(
+                "farbfeld: width {width} exceeds max_width {m}"
+            )));
         }
-        if let Some(m) = self.max_height {
-            if height > m {
-                return Err(FarbfeldError::limit(format!(
-                    "farbfeld: height {height} exceeds max_height {m}"
-                )));
-            }
+        if let Some(m) = self.max_height
+            && height > m
+        {
+            return Err(FarbfeldError::limit(format!(
+                "farbfeld: height {height} exceeds max_height {m}"
+            )));
         }
         let pixels = u64::from(width) * u64::from(height);
-        if let Some(m) = self.max_pixels {
-            if pixels > m {
-                return Err(FarbfeldError::limit(format!(
-                    "farbfeld: {pixels} pixels exceed max_pixels {m}"
-                )));
-            }
+        if let Some(m) = self.max_pixels
+            && pixels > m
+        {
+            return Err(FarbfeldError::limit(format!(
+                "farbfeld: {pixels} pixels exceed max_pixels {m}"
+            )));
         }
         if let Some(m) = self.max_bytes {
             match pixels.checked_mul(BYTES_PER_PIXEL as u64) {
@@ -115,12 +115,12 @@ impl DecodeOptions {
                 Some(bytes) => {
                     return Err(FarbfeldError::limit(format!(
                         "farbfeld: decoded plane of {bytes} bytes exceeds max_bytes {m}"
-                    )))
+                    )));
                 }
                 None => {
                     return Err(FarbfeldError::limit(format!(
                         "farbfeld: decoded plane of {pixels} × {BYTES_PER_PIXEL} bytes exceeds max_bytes {m}"
-                    )))
+                    )));
                 }
             }
         }

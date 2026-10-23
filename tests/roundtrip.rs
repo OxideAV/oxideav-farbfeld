@@ -14,8 +14,8 @@
 #![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
 
 use oxideav_farbfeld::{
-    encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    Rgba16Image, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    BYTES_PER_PIXEL, HEADER_LEN, MAGIC, Rgba16Image, encode_farbfeld, encode_farbfeld_from_rgba16,
+    encode_farbfeld_image, parse_farbfeld,
 };
 
 /// Build a synthetic farbfeld file by hand — the parser/encoder under

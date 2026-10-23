@@ -81,8 +81,8 @@
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    Rgba16Image, FarbfeldStreamWriter, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    BYTES_PER_PIXEL, FarbfeldStreamWriter, HEADER_LEN, MAGIC, Rgba16Image, encode_farbfeld,
+    encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
 };
 
 /// Maximum width / height drawn from the fuzz bytes. 64×64 caps the
@@ -121,7 +121,9 @@ fuzz_target!(|data: &[u8]| {
 
     // --- Path B: encode_farbfeld_from_rgba16 (native-endian pixels) -
     let pixels_native: Vec<[u16; 4]> = body_be
-        .chunks_exact(BYTES_PER_PIXEL)
+        .as_chunks::<BYTES_PER_PIXEL>()
+        .0
+        .iter()
         .map(|c| {
             [
                 u16::from_be_bytes([c[0], c[1]]),

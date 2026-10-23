@@ -35,7 +35,7 @@
 use std::borrow::Cow;
 
 use crate::error::{FarbfeldError, Result};
-use crate::parser::{FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN};
+use crate::parser::{BYTES_PER_PIXEL, FarbfeldHeader, HEADER_LEN};
 use crate::rgba16::Rgba16Image;
 
 // ---------------------------------------------------------------------------
@@ -425,7 +425,7 @@ impl FarbfeldImage {
         let mut plane = vec![0u8; plane_len];
         for (src, dst) in data[..need]
             .chunks_exact(bpp)
-            .zip(plane.chunks_exact_mut(BYTES_PER_PIXEL))
+            .zip(plane.as_chunks_mut::<BYTES_PER_PIXEL>().0.iter_mut())
         {
             // `v × 257` in little-endian is simply `[v, v]`.
             dst[0] = src[0];
@@ -576,7 +576,7 @@ impl FarbfeldImage {
     pub fn to_rgba16(&self) -> Rgba16Image {
         let packed = self.packed_pixels();
         let mut data = vec![0u16; packed.len() / 2];
-        for (chunk, slot) in packed.chunks_exact(2).zip(data.iter_mut()) {
+        for (chunk, slot) in packed.as_chunks::<2>().0.iter().zip(data.iter_mut()) {
             *slot = u16::from_le_bytes([chunk[0], chunk[1]]);
         }
         Rgba16Image {
@@ -620,7 +620,9 @@ impl FarbfeldImage {
             };
             let dst = &mut out[y * w * bpp..(y + 1) * w * bpp];
             for (s, px) in row
-                .chunks_exact(BYTES_PER_PIXEL)
+                .as_chunks::<BYTES_PER_PIXEL>()
+                .0
+                .iter()
                 .zip(dst.chunks_exact_mut(bpp))
             {
                 // Little-endian: the high byte of sample `i` is at
@@ -895,7 +897,9 @@ mod tests {
         assert_eq!(s.data[4 * 255..4 * 256], [0xFFFF, 0, 0xAA * 257, 0xFFFF]);
         assert_eq!(img.to_rgb8(), rgb);
         let rgba_expect: Vec<u8> = rgb
-            .chunks_exact(3)
+            .as_chunks::<3>()
+            .0
+            .iter()
             .flat_map(|p| [p[0], p[1], p[2], 255])
             .collect();
         assert_eq!(img.to_rgba8(), rgba_expect);
@@ -905,7 +909,12 @@ mod tests {
             .collect();
         let img = FarbfeldImage::from_rgba8(256, 1, rgba.clone()).unwrap();
         assert_eq!(img.to_rgba8(), rgba);
-        let rgb_expect: Vec<u8> = rgba.chunks_exact(4).flat_map(|p| p[..3].to_vec()).collect();
+        let rgb_expect: Vec<u8> = rgba
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .flat_map(|p| p[..3].to_vec())
+            .collect();
         assert_eq!(img.to_rgb8(), rgb_expect);
         assert!(matches!(
             FarbfeldImage::from_rgb8(2, 2, vec![0; 11]),
@@ -934,7 +943,9 @@ mod tests {
         .unwrap();
         assert_eq!(
             img.to_rgba8(),
-            [255, 1, 0, 0x80, 0x12, 0xAB, 0, 0xFF, 0, 0, 0, 0, 0x7F, 0x80, 0xFF, 0]
+            [
+                255, 1, 0, 0x80, 0x12, 0xAB, 0, 0xFF, 0, 0, 0, 0, 0x7F, 0x80, 0xFF, 0
+            ]
         );
     }
 

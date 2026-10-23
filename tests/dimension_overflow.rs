@@ -59,8 +59,8 @@
 #![allow(deprecated)] // pre-contract entry points stay the regression gate for one release
 
 use oxideav_farbfeld::{
-    parse_farbfeld, parse_farbfeld_header, peek_farbfeld_dimensions, FarbfeldError,
-    BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    BYTES_PER_PIXEL, FarbfeldError, HEADER_LEN, MAGIC, parse_farbfeld, parse_farbfeld_header,
+    peek_farbfeld_dimensions,
 };
 
 // ---------------------------------------------------------------------------

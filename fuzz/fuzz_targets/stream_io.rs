@@ -75,8 +75,8 @@ use std::io::{self, Read, Write};
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    encode_farbfeld_image, parse_farbfeld, Rgba16Image, FarbfeldStreamReader,
-    FarbfeldStreamWriter, BYTES_PER_PIXEL, HEADER_LEN,
+    BYTES_PER_PIXEL, FarbfeldStreamReader, FarbfeldStreamWriter, HEADER_LEN, Rgba16Image,
+    encode_farbfeld_image, parse_farbfeld,
 };
 
 /// Maximum width / height drawn from the fuzz bytes. 32×32 caps the
@@ -221,7 +221,7 @@ fuzz_target!(|data: &[u8]| {
     // Native-endian flat samples derived from the BE body — the shape
     // both `Rgba16Image` and `FarbfeldStreamWriter::write_row` accept.
     let mut samples_native: Vec<u16> = Vec::with_capacity(sample_count);
-    for c in body_be.chunks_exact(2) {
+    for c in body_be.as_chunks::<2>().0.iter() {
         samples_native.push(u16::from_be_bytes([c[0], c[1]]));
     }
     debug_assert_eq!(samples_native.len(), sample_count);

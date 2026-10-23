@@ -105,9 +105,9 @@ pub const CODEC_ID_STR: &str = "farbfeld";
 
 // ---- the image-crate API contract ------------------------------------------
 pub use api::{
-    decode, decode_from, decode_from_with, decode_rgb8, decode_rgba16, decode_rgba16_with,
-    decode_rgba8, decode_with, encode, encode_rgb8, encode_rgba16, encode_rgba8, encode_to, info,
-    probe,
+    decode, decode_from, decode_from_with, decode_rgb8, decode_rgba8, decode_rgba16,
+    decode_rgba16_with, decode_with, encode, encode_rgb8, encode_rgba8, encode_rgba16, encode_to,
+    info, probe,
 };
 pub use error::{Error, FarbfeldError, Result};
 pub use image::{
@@ -117,8 +117,8 @@ pub use image::{
 pub use options::{DecodeOptions, EncodeOptions};
 
 // ---- farbfeld depth APIs ----------------------------------------------------
-pub use parser::{FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC};
-pub use rgba16::{Pixels, Rgba16Image, Rows, RowsMut, CHANNELS_PER_PIXEL};
+pub use parser::{BYTES_PER_PIXEL, FarbfeldHeader, HEADER_LEN, MAGIC};
+pub use rgba16::{CHANNELS_PER_PIXEL, Pixels, Rgba16Image, Rows, RowsMut};
 pub use stream::{FarbfeldStreamReader, FarbfeldStreamWriter};
 
 // ---- deprecated pre-contract entry points (one release) --------------------

@@ -316,7 +316,7 @@ mod tests {
         let samples: Vec<u16> = (0..2 * 3 * 4).map(|i| i as u16 * 0x0101).collect();
         let tight = FarbfeldImage::from_rgba16(2, 3, &samples).unwrap();
         let mut padded = Vec::new();
-        for row in tight.as_bytes().unwrap().chunks_exact(16) {
+        for row in tight.as_bytes().unwrap().as_chunks::<16>().0.iter() {
             padded.extend_from_slice(row);
             padded.extend_from_slice(&[0; 8]);
         }

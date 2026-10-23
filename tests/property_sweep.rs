@@ -76,9 +76,9 @@
 use std::io::Cursor;
 
 use oxideav_farbfeld::{
+    BYTES_PER_PIXEL, FarbfeldStreamReader, FarbfeldStreamWriter, HEADER_LEN, MAGIC, Rgba16Image,
     encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    parse_farbfeld_header, FarbfeldStreamReader, FarbfeldStreamWriter, Rgba16Image,
-    BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    parse_farbfeld_header,
 };
 
 // ---------------------------------------------------------------------------

@@ -8,10 +8,10 @@
 use std::io::Cursor;
 
 use oxideav_farbfeld::{
-    decode, decode_from, decode_from_with, decode_rgb8, decode_rgba16, decode_rgba8, decode_with,
-    encode, encode_rgb8, encode_rgba16, encode_rgba8, encode_to, info, probe, ColorInfo,
-    DecodeOptions, EncodeOptions, FarbfeldError, FarbfeldImage, Metadata, PixelFormat, Plane,
-    HEADER_LEN, MAGIC,
+    ColorInfo, DecodeOptions, EncodeOptions, FarbfeldError, FarbfeldImage, HEADER_LEN, MAGIC,
+    Metadata, PixelFormat, Plane, decode, decode_from, decode_from_with, decode_rgb8, decode_rgba8,
+    decode_rgba16, decode_with, encode, encode_rgb8, encode_rgba8, encode_rgba16, encode_to, info,
+    probe,
 };
 
 /// xorshift64* — small, deterministic, good enough to cover every bit
@@ -161,7 +161,9 @@ fn check_round_trip(seed: u64, w: u32, h: u32) {
     assert_eq!(rgba8, expect, "{ctx}: to_rgba8");
     let rgb8 = img.to_rgb8();
     let expect3: Vec<u8> = expect
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .flat_map(|p| p[..3].to_vec())
         .collect();
     assert_eq!(rgb8, expect3, "{ctx}: to_rgb8");
@@ -181,7 +183,12 @@ fn check_round_trip(seed: u64, w: u32, h: u32) {
     assert_eq!(decode_rgb8(&f3).unwrap().data, rgb8, "{ctx}: rgb8 inverse");
     // The widening is `v × 257`, alpha opaque for RGB input.
     let wide = decode_rgba16(&f3).unwrap().data;
-    for (px, src) in wide.chunks_exact(4).zip(rgb8.chunks_exact(3)) {
+    for (px, src) in wide
+        .as_chunks::<4>()
+        .0
+        .iter()
+        .zip(rgb8.as_chunks::<3>().0.iter())
+    {
         assert_eq!(px[0], src[0] as u16 * 257, "{ctx}");
         assert_eq!(px[1], src[1] as u16 * 257, "{ctx}");
         assert_eq!(px[2], src[2] as u16 * 257, "{ctx}");

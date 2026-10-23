@@ -192,7 +192,7 @@ pub(crate) fn decode_rgba16_with(bytes: &[u8], opts: &DecodeOptions) -> Result<R
     // index-and-decode loop (which the optimiser tends not to vectorise
     // because of the in-bounds proof on each `body[off]`), allocate the
     // sample buffer up front and walk it in lockstep with
-    // `body.chunks_exact(2)`. The compiler then sees two `&[u8; 2]`-
+    // `body.as_chunks::<2>().0.iter()`. The compiler then sees two `&[u8; 2]`-
     // shaped slices joined by `zip` and can hoist the `from_be_bytes`
     // into a single 16-bit byte-swap per pair, which the auto-vectoriser
     // turns into a SIMD bswap (8 samples / 16 bytes per cycle on
@@ -261,7 +261,7 @@ pub fn parse_farbfeld(bytes: &[u8]) -> Result<Rgba16Image> {
 /// violated; it does not panic.
 #[inline]
 pub(crate) fn decode_be_samples(body: &[u8], out: &mut [u16]) {
-    for (chunk, slot) in body.chunks_exact(2).zip(out.iter_mut()) {
+    for (chunk, slot) in body.as_chunks::<2>().0.iter().zip(out.iter_mut()) {
         // `chunks_exact` yields `&[u8]` of guaranteed length 2; the
         // `try_into` is a const-time copy the optimiser sees through.
         *slot = u16::from_be_bytes([chunk[0], chunk[1]]);

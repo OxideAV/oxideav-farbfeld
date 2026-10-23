@@ -159,9 +159,9 @@ pub fn encode_to<W: Write>(image: &FarbfeldImage, _opts: &EncodeOptions, w: W) -
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::FarbfeldError;
     use crate::image::{ColorInfo, PixelFormat};
     use crate::parser::{HEADER_LEN, MAGIC};
-    use crate::FarbfeldError;
 
     fn samples(w: u32, h: u32) -> Vec<u16> {
         (0..(w * h * 4))
@@ -246,7 +246,9 @@ mod tests {
         assert_eq!(rgba.as_bytes(), &expect[..]);
         let rgb = decode_rgb8(&bytes).unwrap();
         let expect3: Vec<u8> = expect
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .flat_map(|p| p[..3].to_vec())
             .collect();
         assert_eq!(rgb.into_raw(), expect3);
@@ -308,7 +310,7 @@ mod tests {
         let s = samples(2, 2);
         let tight = FarbfeldImage::from_rgba16(2, 2, &s).unwrap();
         let mut padded = Vec::new();
-        for row in tight.as_bytes().unwrap().chunks_exact(16) {
+        for row in tight.as_bytes().unwrap().as_chunks::<16>().0.iter() {
             padded.extend_from_slice(row);
             padded.extend_from_slice(&[0xEE; 6]);
         }
@@ -466,7 +468,9 @@ mod tests {
         assert_eq!(FarbfeldImage::from(old.clone()), decode(&bytes).unwrap());
         assert_eq!(crate::encode_farbfeld_image(&old).unwrap(), bytes);
         let quads: Vec<[u16; 4]> = s
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .map(|c| [c[0], c[1], c[2], c[3]])
             .collect();
         assert_eq!(

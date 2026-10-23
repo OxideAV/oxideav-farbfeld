@@ -77,11 +77,11 @@
 
 use std::io::Cursor;
 
-use criterion::{black_box, criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
 
 use oxideav_farbfeld::{
-    encode_farbfeld, encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld,
-    peek_farbfeld_dimensions, FarbfeldStreamReader, FarbfeldStreamWriter, Rgba16Image, HEADER_LEN,
+    FarbfeldStreamReader, FarbfeldStreamWriter, HEADER_LEN, Rgba16Image, encode_farbfeld,
+    encode_farbfeld_from_rgba16, encode_farbfeld_image, parse_farbfeld, peek_farbfeld_dimensions,
 };
 
 /// Image sizes covered by every group. The 4 MiB top end is large
@@ -432,7 +432,7 @@ fn bench_peek_header(c: &mut Criterion) {
 /// `decode_rgba8`, `encode` and `encode_to`. Reported in the README
 /// "Limits" section; 10 samples because each iteration moves ~96 MB.
 fn bench_contract_12mp(c: &mut Criterion) {
-    use oxideav_farbfeld::{decode, decode_from, decode_rgba8, encode, encode_to, EncodeOptions};
+    use oxideav_farbfeld::{EncodeOptions, decode, decode_from, decode_rgba8, encode, encode_to};
 
     let (w, h) = (4000u32, 3000u32);
     let pixels = pattern_pixels(w, h);

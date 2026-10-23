@@ -251,16 +251,12 @@ impl Rgba16Image {
         // iterator that still reports `height` rows below.
         let row_samples = (self.width as usize) * CHANNELS_PER_PIXEL;
         let height = self.height as usize;
-        if row_samples == 0 {
-            RowsMut {
-                inner: [].chunks_exact_mut(1),
-                zero_width_remaining: height,
-            }
-        } else {
-            RowsMut {
-                inner: self.data.chunks_exact_mut(row_samples),
-                zero_width_remaining: 0,
-            }
+        // `width == 0` leaves `data` empty, so any stride walks it as
+        // zero chunks; the `height` empty rows are synthesised from
+        // `zero_width_remaining` instead.
+        RowsMut {
+            inner: self.data.chunks_exact_mut(row_samples.max(1)),
+            zero_width_remaining: if row_samples == 0 { height } else { 0 },
         }
     }
 
@@ -291,7 +287,7 @@ impl Rgba16Image {
     /// [`pixels`]: Rgba16Image::pixels
     pub fn pixels(&self) -> Pixels<'_> {
         Pixels {
-            inner: self.data.chunks_exact(CHANNELS_PER_PIXEL),
+            inner: self.data.as_chunks::<CHANNELS_PER_PIXEL>().0.iter(),
         }
     }
 
@@ -489,17 +485,16 @@ impl ExactSizeIterator for RowsMut<'_> {
 /// yielding each as an owned `[R, G, B, A]` `u16` quad. Created by
 /// [`Rgba16Image::data`].
 pub struct Pixels<'a> {
-    inner: std::slice::ChunksExact<'a, u16>,
+    inner: std::slice::Iter<'a, [u16; CHANNELS_PER_PIXEL]>,
 }
 
 impl Iterator for Pixels<'_> {
     type Item = [u16; CHANNELS_PER_PIXEL];
 
     fn next(&mut self) -> Option<[u16; CHANNELS_PER_PIXEL]> {
-        // `chunks_exact(4)` guarantees every yielded slice is exactly
-        // four samples long, so the array conversion can't fail; map it
-        // to a value-copy quad.
-        self.inner.next().map(|c| [c[0], c[1], c[2], c[3]])
+        // `as_chunks::<4>()` yields exactly-four-sample arrays; copy
+        // each out as a value quad.
+        self.inner.next().copied()
     }
 
     fn size_hint(&self) -> (usize, Option<usize>) {
@@ -510,10 +505,8 @@ impl Iterator for Pixels<'_> {
 
 impl DoubleEndedIterator for Pixels<'_> {
     fn next_back(&mut self) -> Option<Self::Item> {
-        // Same `chunks_exact(4)` guarantee as `next`: every yielded
-        // chunk is exactly four samples, so the array conversion is
-        // infallible.
-        self.inner.next_back().map(|c| [c[0], c[1], c[2], c[3]])
+        // Same `as_chunks::<4>()` guarantee as `next`.
+        self.inner.next_back().copied()
     }
 }
 
@@ -619,7 +612,9 @@ mod tests {
         assert_eq!(r.len(), 2 * CHANNELS_PER_PIXEL);
         assert_eq!(
             r,
-            &[0xFFFF, 0x0000, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF]
+            &[
+                0xFFFF, 0x0000, 0x0000, 0xFFFF, 0x0000, 0xFFFF, 0x0000, 0xFFFF
+            ]
         );
     }
 
@@ -932,7 +927,7 @@ mod tests {
     fn pixels_iter_reversed_is_full_mirror_of_forward() {
         // Multi-row frame to confirm the reverse honours row-major order.
         let mut pixels = vec![0u16; 3 * 2 * CHANNELS_PER_PIXEL];
-        for (i, p) in pixels.chunks_exact_mut(4).enumerate() {
+        for (i, p) in pixels.as_chunks_mut::<4>().0.iter_mut().enumerate() {
             p[0] = i as u16;
         }
         let img = Rgba16Image::new(3, 2, pixels).unwrap();

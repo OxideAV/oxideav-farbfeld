@@ -26,7 +26,7 @@ use crate::error::{FarbfeldError, Result};
 use crate::image::{FarbfeldImage, PixelFormat, Plane};
 use crate::options::DecodeOptions;
 use crate::parser::{
-    decode_be_samples, read_dimensions, FarbfeldHeader, BYTES_PER_PIXEL, HEADER_LEN, MAGIC,
+    BYTES_PER_PIXEL, FarbfeldHeader, HEADER_LEN, MAGIC, decode_be_samples, read_dimensions,
 };
 
 /// Row-at-a-time farbfeld reader.

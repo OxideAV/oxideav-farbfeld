@@ -52,7 +52,7 @@ impl Encoder for FarbfeldEncoder {
             _ => {
                 return Err(oxideav_core::Error::invalid(
                     "farbfeld encoder: expected video frame",
-                ))
+                ));
             }
         };
         let image = FarbfeldImage::from_video_frame(vf, &self.out_params)?;

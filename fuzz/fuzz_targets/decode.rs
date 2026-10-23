@@ -40,8 +40,8 @@ use std::io::Cursor;
 
 use libfuzzer_sys::fuzz_target;
 use oxideav_farbfeld::{
-    decode_rgba16 as parse_farbfeld, encode_rgba16, info, EncodeOptions, FarbfeldStreamReader,
-    HEADER_LEN,
+    EncodeOptions, FarbfeldStreamReader, HEADER_LEN, decode_rgba16 as parse_farbfeld,
+    encode_rgba16, info,
 };
 
 fuzz_target!(|data: &[u8]| {

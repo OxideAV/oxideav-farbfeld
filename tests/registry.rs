@@ -15,7 +15,7 @@ use oxideav_core::{
     StreamInfo, TimeBase, VideoFrame, VideoPlane,
 };
 
-use oxideav_farbfeld::{container, make_decoder, make_encoder, register_registries, CODEC_ID_STR};
+use oxideav_farbfeld::{CODEC_ID_STR, container, make_decoder, make_encoder, register_registries};
 
 fn build_reference(width: u32, height: u32) -> Vec<u8> {
     // Mirror the make_test_pixels helper from roundtrip.rs.

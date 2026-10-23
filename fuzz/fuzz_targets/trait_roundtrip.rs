@@ -31,6 +31,7 @@
 //!   reproduces the original bytes exactly (farbfeld is lossless with one
 //!   canonical serialisation). This pins the decoder LE conversion and
 //!   the encoder one-pass LE->BE swap against each other.
+//!
 //! The container demuxer is held to the same accept/reject verdict as the
 //! whole-file parser.
 //!
@@ -53,7 +54,9 @@ use oxideav_core::{
     CodecId, CodecParameters, Frame, NullCodecResolver, Packet, PixelFormat, ReadSeek, TimeBase,
     VideoFrame, VideoPlane,
 };
-use oxideav_farbfeld::{container, decode_rgba16 as parse_farbfeld, make_decoder, make_encoder, CODEC_ID_STR};
+use oxideav_farbfeld::{
+    CODEC_ID_STR, container, decode_rgba16 as parse_farbfeld, make_decoder, make_encoder,
+};
 
 fuzz_target!(|data: &[u8]| {
     decode_surface(data);
@@ -212,7 +215,12 @@ fn encode_surface(data: &[u8]) {
     for y in 0..height as usize {
         let src = &src_plane.data[y * stride..y * stride + row_bytes];
         let dst = &body_be[y * row_bytes..y * row_bytes + row_bytes];
-        for (s, d) in src.chunks_exact(2).zip(dst.chunks_exact(2)) {
+        for (s, d) in src
+            .as_chunks::<2>()
+            .0
+            .iter()
+            .zip(dst.as_chunks::<2>().0.iter())
+        {
             // Encoder swaps LE [lo, hi] source into BE [hi, lo] on disk.
             assert_eq!(d[0], s[1], "BE high byte must equal LE low byte");
             assert_eq!(d[1], s[0], "BE low byte must equal LE high byte");
