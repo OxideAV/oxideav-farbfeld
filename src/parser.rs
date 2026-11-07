@@ -54,6 +54,7 @@ pub const BYTES_PER_PIXEL: usize = 8;
 /// equivalent for callers of the root API is [`crate::ImageInfo`] (via
 /// [`crate::info`]), which converts with [`crate::ImageInfo::header`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[non_exhaustive]
 pub struct FarbfeldHeader {
     /// Picture width in pixels, exactly as carried on disk.
     pub width: u32,

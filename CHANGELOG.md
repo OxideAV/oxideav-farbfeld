@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- API hygiene: `FarbfeldHeader` is `#[non_exhaustive]`; build it with
+  `FarbfeldHeader::new`. No behaviour change.
+
 ## [0.0.6](https://github.com/OxideAV/oxideav-farbfeld/compare/v0.0.5...v0.0.6) - 2026-10-23
 
 ### Other
